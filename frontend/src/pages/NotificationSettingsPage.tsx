@@ -1,17 +1,13 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import {
-  Bell,
   CheckCircle2,
   AlertTriangle,
   XCircle,
   Send,
   RefreshCw,
   Sliders,
-  ShieldAlert,
   Clock,
-  ExternalLink,
   MessageSquare,
-  Sparkles,
   Zap,
 } from 'lucide-react';
 import { api } from '../api/client';

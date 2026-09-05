@@ -125,3 +125,44 @@ def get_latest_health_event(
         .order_by(IntegrationHealthEvent.occurred_at.desc())
         .first()
     )
+
+
+# ── Phase 10: Response Loop actions ──────────────────────────────────────
+
+
+def update_suggested_reply(
+    db: Session,
+    message_id: int,
+    suggested_reply: str,
+) -> RecruiterMessage | None:
+    """Update or save a suggested reply on a recruiter message."""
+    msg = get_message(db, message_id)
+    if msg is None:
+        return None
+    msg.suggested_reply = suggested_reply
+    db.flush()
+    return msg
+
+
+def record_message_action(
+    db: Session,
+    message_id: int,
+    action_taken: str,
+    draft_id: str | None = None,
+    suggested_reply: str | None = None,
+) -> RecruiterMessage | None:
+    """Record an approval or acknowledgment action taken on a message."""
+    from datetime import datetime, timezone
+
+    msg = get_message(db, message_id)
+    if msg is None:
+        return None
+    msg.action_taken = action_taken
+    msg.action_taken_at = datetime.now(timezone.utc)
+    if draft_id is not None:
+        msg.draft_id = draft_id
+    if suggested_reply is not None:
+        msg.suggested_reply = suggested_reply
+    db.flush()
+    return msg
+

@@ -94,7 +94,7 @@ class BasePlatformAdapter(ABC):
         custom_answers: list[dict[str, Any]] | None = None,
     ) -> FillResult:
         """Fill structured fields and drafted custom answers into form or draft payload.
-        Stops before submit — never clicks or triggers submit programmatically!
+        System invariant: Never autonomously submits; explicit human authorization is required.
         """
         raise NotImplementedError
 

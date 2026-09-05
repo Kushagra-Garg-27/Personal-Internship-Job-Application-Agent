@@ -253,15 +253,45 @@ class ApplicationFiller:
             except Exception:
                 pass
 
+        adapter = resolve_adapter(opp)
+
+        # ── Experimental Browser Tier ─────────────────────────────────
+        # Candidate physically clicked submit in the opened browser window;
+        # this confirm action updates and persists the confirmed state.
+        if not hasattr(adapter, "execute_submission"):
+            now = datetime.now(timezone.utc)
+            conf_ref = f"BROWSER-{adapter.adapter_name.upper()}-SUBMITTED"
+            application_service.update_application_status(
+                session,
+                app.id,
+                status="submitted",
+                submitted_at=now,
+                confirmation_ref=conf_ref,
+            )
+            opportunity_service.transition_status(
+                session,
+                opp.id,
+                OpportunityStatus.APPLIED,
+                reason=f"Human confirmed physical submission in {adapter.adapter_name} browser window",
+                actor="human_submission",
+            )
+            session.commit()
+            return {
+                "success": True,
+                "status": "applied",
+                "confirmation_ref": conf_ref,
+                "submitted_at": now.isoformat(),
+                "mode": "browser_confirmed",
+            }
+
+        # ── Stable HTTP API Tier ──────────────────────────────────────
+        # Candidate reviews pending draft payload and explicitly authorizes
+        # the programmatic HTTP POST submission call.
         draft_payload = notes_data.get("draft_payload")
         if not draft_payload:
             raise ValueError("No draft payload found on application record to submit.")
 
-        adapter = resolve_adapter(opp)
-        if not hasattr(adapter, "execute_submission"):
-            raise ValueError(f"Adapter {adapter.adapter_name} does not support programmatic HTTP submission.")
-
-        # Execute submission
+        # Execute authorized HTTP submission
         result = adapter.execute_submission(draft_payload)
 
         # Ambiguous timeout duplicate prevention check (§5.7)

@@ -95,8 +95,12 @@ def confirm_submit_application(
     application_id: int,
     db: Session = Depends(get_db),
 ):
-    """Human confirmation action to execute pending draft submission (Phase 9).
-    Submits the reviewed draft payload to the platform API (Greenhouse/Lever).
+    """Human confirmation action to finalize application submission (Phase 9).
+
+    - For Stable HTTP tier (Greenhouse/Lever): Authorizes and executes the pending
+      draft HTTP submission to the platform API.
+    - For Experimental browser tier (Internshala/Unstop): Confirms that the candidate
+      has physically clicked Submit in the open browser window and transitions DB state.
     """
     from worker.engine.filler import ApplicationFiller
 

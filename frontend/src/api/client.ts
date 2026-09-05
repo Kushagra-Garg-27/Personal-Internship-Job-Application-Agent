@@ -2,6 +2,9 @@ import type {
   DashboardFeedResponse,
   DashboardOpportunityItem,
   MessageListResponse,
+  RecruiterMessage,
+  ApproveReplyResponse,
+  AcknowledgeMessageResponse,
   MessageStats,
   IntegrationHealthListResponse,
   NotificationSettings,
@@ -148,6 +151,32 @@ export const api = {
     q.set('limit', String(limit));
     return request<IntegrationHealthListResponse>(`/integration-health?${q.toString()}`);
   },
+
+  // ── Recruiter Response Loop (Phase 10) ──────────────────────────────────
+  async draftReply(messageId: number): Promise<RecruiterMessage> {
+    return request<RecruiterMessage>(`/messages/${messageId}/draft-reply`, {
+      method: 'POST',
+    });
+  },
+
+  async approveReply(
+    messageId: number,
+    editedReply?: string,
+  ): Promise<ApproveReplyResponse> {
+    return request<ApproveReplyResponse>(`/messages/${messageId}/approve-reply`, {
+      method: 'POST',
+      body: JSON.stringify({ edited_reply: editedReply }),
+    });
+  },
+
+  async acknowledgeMessage(
+    messageId: number,
+  ): Promise<AcknowledgeMessageResponse> {
+    return request<AcknowledgeMessageResponse>(`/messages/${messageId}/acknowledge`, {
+      method: 'POST',
+    });
+  },
+
 
   // ── Notifications (Phase 8) ─────────────────────────────────────────────
   async getNotificationSettings(): Promise<NotificationSettings> {

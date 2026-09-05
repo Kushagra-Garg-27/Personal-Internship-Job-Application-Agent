@@ -559,8 +559,9 @@ Opportunities Table (ready_to_apply) ──► Worker Poller (worker/runner.py)
    - The Worker holds active browser platform sessions, but **never** touches email credentials or notification tokens (`NotificationService`).
    - Communication happens strictly via the shared SQLite database: Worker transitions opportunity status (`awaiting_submission` or `manual_application_required`), and a Core-side watcher job inside the Core process detects these transitions and fires Telegram/WhatsApp alerts.
 3. **The Non-Negotiable Human-Submit Gate**:
-   - **Experimental tier (Internshala, Unstop)**: Playwright fills the form, uploads the pinned resume, inserts AI-drafted answers, and **leaves the real browser window open** at the completed, unsubmitted form. The human candidate reviews the form in that window and clicks Submit themselves. The Worker never clicks submit programmatically.
-   - **Stable tier (Greenhouse, Lever)**: Assembles the HTTP submission payload into a pending reviewable draft. The actual submission call only fires after an explicit confirm action (`POST /applications/{id}/confirm-submit`), never automatically.
+   - **System Invariant: Never autonomously submits; explicit human authorization is required.**
+   - **Experimental tier (Internshala, Unstop)**: Playwright fills the form, uploads the pinned resume, inserts AI-drafted answers, and **leaves the real browser window open** at the completed, unsubmitted form. The human candidate reviews the form in that window and clicks Submit themselves. The Worker never clicks submit in the browser. The candidate then clicks "Confirm Submitted" on the dashboard (or calls `POST /applications/{id}/confirm-submit`), which updates and confirms the `applied` status in the database.
+   - **Stable tier (Greenhouse, Lever)**: Assembles the HTTP submission payload into a pending reviewable draft. The actual submission call only fires after an explicit confirm action (`POST /applications/{id}/confirm-submit`), never automatically or autonomously once filling completes.
 4. **AI-Drafted Custom Questions**:
    - Free-text application questions ("Why do you want to work here?", etc.) are drafted with Gemini, reusing Phase 5's client & quota budget.
    - Hard architectural rule: every generated answer is prefixed with `[AI DRAFT - PENDING APPROVAL]` and requires explicit human review and approval before use.
@@ -603,6 +604,68 @@ This opens a visible browser window, allows you to log in manually, captures ses
 | `POST` | `/opportunities/{id}/applications` | Create application attempt (`mark_submission_attempted`) |
 | `PATCH` | `/applications/{id}` | Update application status, confirmation ref, or notes |
 | `POST` | `/applications/{id}/confirm-submit` | Human confirmation action to execute pending draft submission for stable HTTP adapters |
+
+## Phase 10 — Recruiter Response Loop
+
+Phase 10 closes the recruiter interaction loop per §5.4 and §7: `Classify → notify → suggested reply → you send`, ending with `Status update → back into Application DB`.
+
+```
+Recruiter Email ──► Classify & Link (Phase 7)
+                         │
+                         ▼
+        Notify Candidate (Phase 8: Telegram/WhatsApp)
+                         │
+                         ▼
+       Gemini Suggested Reply Drafting (reusing Phase 5 quota)
+                         │
+                         ▼
+            [YOU REVIEW / EDIT / APPROVE]  <── Mandatory Human Gate
+                         │
+        ┌────────────────┴────────────────┐
+        ▼                                 ▼
+Reply-Bearing Category           Non-Reply Category (Rejection)
+  • Editable Reply                 • Direct "Acknowledge" action
+  • "Approve & create draft"       • No email reply drafted
+        │                                 │
+        ▼                                 ▼
+Create Gmail Draft (Drafts only)         —
+        │                                 │
+        └────────────────┬────────────────┘
+                         ▼
+        Automatic Status Update via Status Machine
+        • interview_scheduled / offer_received / rejected_by_recruiter
+        • Atomic write logged in status_history
+```
+
+### The Hard Invariant: "Any temptation to let it auto-send — resist it."
+
+1. **Restricted Gmail OAuth Permissions**:
+   The app requests **strictly** the following OAuth scopes:
+   - `https://www.googleapis.com/auth/gmail.readonly` (reading alerts & recruiter replies)
+   - `https://www.googleapis.com/auth/gmail.compose` (creating drafts in Drafts folder)
+
+   **Deliberately excluded**:
+   - `https://www.googleapis.com/auth/gmail.send` is **never requested**.
+   - `https://mail.google.com/` (full access) is **never requested**.
+
+   This turns "you send" from an application-level promise into a permission-level guarantee: even a severe bug in our code cannot send an email on your behalf, because the credentials held by the application lack the structural capability to send messages.
+
+2. **The Review Action — Two Shapes, One Principle**:
+   - **Reply-bearing categories** (`interview_invite`, `screening_question`, `offer`, `follow_up`): Displays the Gemini-drafted reply (prefixed with `[AI SUGGESTED REPLY - EDIT BEFORE SENDING]`) in an editable text area. Clicking **Approve & create draft** creates a draft in your Gmail account via `service.users().drafts().create(...)`. You physically open Gmail and click Send.
+   - **Non-reply categories** (`rejection`, `generic`): Displays an **Acknowledge** button. A plain rejection does not draft a reply, but requires explicit candidate confirmation before transitioning the application to `rejected_by_recruiter`.
+
+3. **Phase 7 Non-Goal Invariant Preserved**:
+   - A newly received or classified message, on its own with no human action taken, **never** changes an application's status.
+   - Status transitions happen exclusively upon clicking **Approve & create draft** or **Acknowledge**.
+
+### Backend Endpoints (Phase 10)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/messages/{id}/draft-reply` | Generate or refresh an AI-suggested reply draft with Gemini |
+| `POST` | `/messages/{id}/approve-reply` | Approve reply (with optional human edits), create Gmail draft, and transition application to `interview_scheduled` or `offer_received` |
+| `POST` | `/messages/{id}/acknowledge` | Acknowledge a non-reply message (e.g. rejection) and transition application to `rejected_by_recruiter` |
+
 
 
 

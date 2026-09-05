@@ -123,9 +123,29 @@ export interface RecruiterMessage {
   classification_confidence?: number | null;
   link_confidence?: LinkConfidence | null;
   created_at: string;
-  updated_at: string;
+  opportunity_id?: number | null;
   opportunity_title?: string | null;
   opportunity_company?: string | null;
+  opportunity_status?: string | null;
+  suggested_reply?: string | null;
+  draft_id?: string | null;
+  action_taken?: 'approved' | 'acknowledged' | null;
+  action_taken_at?: string | null;
+}
+
+export interface ApproveReplyResponse {
+  message: RecruiterMessage;
+  opportunity_id: number;
+  opportunity_status: string;
+  draft_id: string;
+  detail: string;
+}
+
+export interface AcknowledgeMessageResponse {
+  message: RecruiterMessage;
+  opportunity_id: number;
+  opportunity_status: string;
+  detail: string;
 }
 
 export interface MessageListResponse {

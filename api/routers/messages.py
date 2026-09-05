@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 from api.deps import get_db
 from core.repositories import message_repo
 from core.schemas.message import (
+    AcknowledgeMessageResponse,
+    ApproveReplyRequest,
+    ApproveReplyResponse,
     IntegrationHealthListResponse,
     IntegrationHealthResponse,
     MessageListResponse,
@@ -19,7 +22,7 @@ router = APIRouter(prefix="/messages", tags=["messages"])
 
 
 def _enrich_message(msg) -> dict:
-    """Add opportunity info from linked application."""
+    """Add opportunity info and response loop status from linked application."""
     data = {
         "id": msg.id,
         "gmail_id": msg.gmail_id,
@@ -36,13 +39,22 @@ def _enrich_message(msg) -> dict:
         "link_confidence": msg.link_confidence,
         "created_at": msg.created_at,
         "updated_at": msg.updated_at,
+        "suggested_reply": msg.suggested_reply,
+        "draft_id": msg.draft_id,
+        "action_taken": msg.action_taken,
+        "action_taken_at": msg.action_taken_at,
+        "opportunity_id": None,
         "opportunity_title": None,
         "opportunity_company": None,
+        "opportunity_status": None,
     }
 
     if msg.application and msg.application.opportunity:
-        data["opportunity_title"] = msg.application.opportunity.title
-        data["opportunity_company"] = msg.application.opportunity.company
+        opp = msg.application.opportunity
+        data["opportunity_id"] = opp.id
+        data["opportunity_title"] = opp.title
+        data["opportunity_company"] = opp.company
+        data["opportunity_status"] = opp.status
 
     return data
 
@@ -87,6 +99,70 @@ def get_message(message_id: int, db: Session = Depends(get_db)):
     if msg is None:
         raise HTTPException(status_code=404, detail="Message not found.")
     return MessageResponse(**_enrich_message(msg))
+
+
+@router.post("/{message_id}/draft-reply", response_model=MessageResponse)
+def generate_draft_reply(message_id: int, db: Session = Depends(get_db)):
+    """Generate or retrieve an AI-drafted reply for a reply-bearing recruiter message."""
+    from core.services import response_loop_service
+
+    try:
+        msg = response_loop_service.generate_reply_draft(db, message_id)
+        db.commit()
+        return MessageResponse(**_enrich_message(msg))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate draft reply: {exc}")
+
+
+@router.post("/{message_id}/approve-reply", response_model=ApproveReplyResponse)
+def approve_reply(
+    message_id: int,
+    req: ApproveReplyRequest | None = None,
+    db: Session = Depends(get_db),
+):
+    """Approve a reply (with optional human edits), create a draft in Gmail, and update application status."""
+    from core.services import response_loop_service
+
+    edited_reply = req.edited_reply if req else None
+    try:
+        msg, opp = response_loop_service.approve_and_create_draft(
+            db, message_id, edited_reply=edited_reply
+        )
+        db.commit()
+        return ApproveReplyResponse(
+            message=MessageResponse(**_enrich_message(msg)),
+            opportunity_id=opp.id,
+            opportunity_status=opp.status,
+            draft_id=msg.draft_id or "",
+            detail="Draft successfully created in your Gmail Drafts folder. Open Gmail to send.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to approve reply: {exc}")
+
+
+@router.post("/{message_id}/acknowledge", response_model=AcknowledgeMessageResponse)
+def acknowledge_message(message_id: int, db: Session = Depends(get_db)):
+    """Acknowledge a non-reply message (e.g. rejection) and update opportunity status."""
+    from core.services import response_loop_service
+
+    try:
+        msg, opp = response_loop_service.acknowledge_message(db, message_id)
+        db.commit()
+        return AcknowledgeMessageResponse(
+            message=MessageResponse(**_enrich_message(msg)),
+            opportunity_id=opp.id,
+            opportunity_status=opp.status,
+            detail="Message acknowledged and application status updated.",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to acknowledge message: {exc}")
+
 
 
 # ── Integration Health ───────────────────────────────────────────────────

@@ -17,8 +17,11 @@ import {
   AlertTriangle,
   XOctagon,
   ChevronDown,
-  ExternalLink,
   Clock,
+  ExternalLink,
+  Sparkles,
+  Send,
+  Check,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
@@ -167,6 +170,82 @@ export const ResponseCenterPlaceholder: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+
+  // Phase 10: Recruiter Response Loop state
+  const [editedReplies, setEditedReplies] = useState<Record<number, string>>({});
+  const [actionLoading, setActionLoading] = useState<Record<number, 'draft' | 'approve' | 'ack' | null>>({});
+  const [actionSuccess, setActionSuccess] = useState<
+    Record<number, { text: string; draftId?: string; newStatus?: string }>
+  >({});
+  const [actionError, setActionError] = useState<Record<number, string>>({});
+
+  const isReplyBearing = (cls?: string | null) =>
+    ['interview_invite', 'screening_question', 'offer', 'follow_up'].includes(cls || '');
+
+  const handleDraftReply = async (msgId: number, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setActionLoading((prev) => ({ ...prev, [msgId]: 'draft' }));
+    setActionError((prev) => ({ ...prev, [msgId]: '' }));
+    try {
+      const updated = await api.draftReply(msgId);
+      setMessages((prev) => prev.map((m) => (m.id === msgId ? updated : m)));
+      if (updated.suggested_reply) {
+        setEditedReplies((prev) => ({ ...prev, [msgId]: updated.suggested_reply || '' }));
+      }
+    } catch (err: any) {
+      setActionError((prev) => ({ ...prev, [msgId]: err.message || 'Failed to draft reply' }));
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [msgId]: null }));
+    }
+  };
+
+  const handleApproveReply = async (msg: RecruiterMessage, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setActionLoading((prev) => ({ ...prev, [msg.id]: 'approve' }));
+    setActionError((prev) => ({ ...prev, [msg.id]: '' }));
+    const textToSend =
+      editedReplies[msg.id] !== undefined
+        ? editedReplies[msg.id]
+        : msg.suggested_reply || '';
+    try {
+      const res = await api.approveReply(msg.id, textToSend);
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? res.message : m)));
+      setActionSuccess((prev) => ({
+        ...prev,
+        [msg.id]: {
+          text: 'Draft ready in your Gmail — go send it!',
+          draftId: res.draft_id,
+          newStatus: res.opportunity_status,
+        },
+      }));
+    } catch (err: any) {
+      setActionError((prev) => ({ ...prev, [msg.id]: err.message || 'Failed to approve reply' }));
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [msg.id]: null }));
+    }
+  };
+
+  const handleAcknowledge = async (msgId: number, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setActionLoading((prev) => ({ ...prev, [msgId]: 'ack' }));
+    setActionError((prev) => ({ ...prev, [msgId]: '' }));
+    try {
+      const res = await api.acknowledgeMessage(msgId);
+      setMessages((prev) => prev.map((m) => (m.id === msgId ? res.message : m)));
+      setActionSuccess((prev) => ({
+        ...prev,
+        [msgId]: {
+          text: 'Message acknowledged.',
+          newStatus: res.opportunity_status,
+        },
+      }));
+    } catch (err: any) {
+      setActionError((prev) => ({ ...prev, [msgId]: err.message || 'Failed to acknowledge message' }));
+    } finally {
+      setActionLoading((prev) => ({ ...prev, [msgId]: null }));
+    }
+  };
+
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -493,7 +572,7 @@ export const ResponseCenterPlaceholder: React.FC = () => {
           </h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.85rem', margin: 0 }}>
             {activeFilter === 'all'
-              ? 'When the response poller detects recruiter replies, they'll appear here — classified and linked to your applications.'
+              ? "When the response poller detects recruiter replies, they'll appear here — classified and linked to your applications."
               : 'Try selecting a different filter or wait for new messages.'}
           </p>
         </div>
@@ -612,23 +691,50 @@ export const ResponseCenterPlaceholder: React.FC = () => {
                     </div>
                   </div>
 
-                  {/* Linked opportunity */}
-                  <div style={{ flexShrink: 0, textAlign: 'right', minWidth: '140px' }}>
+                  {/* Linked opportunity & status */}
+                  <div style={{ flexShrink: 0, textAlign: 'right', minWidth: '160px' }}>
                     {msg.application_id ? (
-                      <div
-                        style={{
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          gap: '5px',
-                          fontSize: '0.75rem',
-                          color: 'var(--emerald-400)',
-                          fontWeight: 500,
-                        }}
-                      >
-                        <LinkIcon size={12} />
-                        <span style={{ maxWidth: '120px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {msg.opportunity_company || `App #${msg.application_id}`}
-                        </span>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '3px' }}>
+                        <div
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            fontSize: '0.75rem',
+                            color: 'var(--emerald-400)',
+                            fontWeight: 500,
+                          }}
+                        >
+                          <LinkIcon size={12} />
+                          <span style={{ maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {msg.opportunity_company || `App #${msg.application_id}`}
+                          </span>
+                        </div>
+                        {msg.opportunity_status && (
+                          <span
+                            style={{
+                              fontSize: '0.68rem',
+                              padding: '2px 6px',
+                              borderRadius: '4px',
+                              background: 'rgba(255, 255, 255, 0.05)',
+                              color: 'var(--text-secondary)',
+                              textTransform: 'capitalize',
+                            }}
+                          >
+                            Status: {msg.opportunity_status.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                        {msg.action_taken && (
+                          <span
+                            style={{
+                              fontSize: '0.65rem',
+                              fontWeight: 600,
+                              color: msg.action_taken === 'approved' ? '#34d399' : '#a5b4fc',
+                            }}
+                          >
+                            {msg.action_taken === 'approved' ? '✓ Draft Created' : '✓ Acknowledged'}
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span
@@ -746,6 +852,369 @@ export const ResponseCenterPlaceholder: React.FC = () => {
                         </div>
                       </div>
                     )}
+
+                    {/* ── Phase 10: Response & Review Loop ──────────────── */}
+                    <div
+                      style={{
+                        marginTop: '16px',
+                        paddingTop: '16px',
+                        borderTop: '1px solid var(--border-subtle)',
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {/* Error banner */}
+                      {actionError[msg.id] && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '10px 14px',
+                            background: 'rgba(239, 68, 68, 0.1)',
+                            border: '1px solid rgba(239, 68, 68, 0.3)',
+                            borderRadius: 'var(--radius-md)',
+                            color: '#f87171',
+                            fontSize: '0.8rem',
+                            marginBottom: '12px',
+                          }}
+                        >
+                          <AlertTriangle size={14} />
+                          {actionError[msg.id]}
+                        </div>
+                      )}
+
+                      {/* Success banner */}
+                      {actionSuccess[msg.id] && (
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            padding: '12px 16px',
+                            background: 'rgba(16, 185, 129, 0.12)',
+                            border: '1px solid rgba(16, 185, 129, 0.3)',
+                            borderRadius: 'var(--radius-md)',
+                            color: '#34d399',
+                            fontSize: '0.82rem',
+                            marginBottom: '14px',
+                          }}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <CheckCircle2 size={16} />
+                            <div>
+                              <strong>{actionSuccess[msg.id].text}</strong>
+                              {actionSuccess[msg.id].draftId && (
+                                <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: '2px' }}>
+                                  Draft ID: {actionSuccess[msg.id].draftId}
+                                </div>
+                              )}
+                              {actionSuccess[msg.id].newStatus && (
+                                <div style={{ fontSize: '0.72rem', color: '#a7f3d0', marginTop: '2px' }}>
+                                  Application status updated to:{' '}
+                                  <strong>{actionSuccess[msg.id].newStatus?.replace(/_/g, ' ')}</strong>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          {actionSuccess[msg.id].draftId && (
+                            <a
+                              href="https://mail.google.com/mail/u/0/#drafts"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '6px',
+                                padding: '6px 12px',
+                                borderRadius: 'var(--radius-sm)',
+                                background: 'rgba(16, 185, 129, 0.2)',
+                                color: '#34d399',
+                                fontSize: '0.75rem',
+                                fontWeight: 600,
+                                textDecoration: 'none',
+                              }}
+                            >
+                              Open Gmail <ExternalLink size={12} />
+                            </a>
+                          )}
+                        </div>
+                      )}
+
+                      {/* Case A: Already approved / draft created */}
+                      {(msg.action_taken === 'approved' || actionSuccess[msg.id]?.draftId) ? (
+                        <div
+                          style={{
+                            background: 'rgba(16, 185, 129, 0.04)',
+                            border: '1px solid rgba(16, 185, 129, 0.2)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: '14px 16px',
+                          }}
+                        >
+                          <div
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              marginBottom: '8px',
+                            }}
+                          >
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#34d399', fontSize: '0.8rem', fontWeight: 600 }}>
+                              <CheckCircle2 size={14} /> Draft ready in your Gmail — go send it
+                            </div>
+                            <a
+                              href="https://mail.google.com/mail/u/0/#drafts"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                                color: '#34d399',
+                                fontSize: '0.75rem',
+                                textDecoration: 'underline',
+                              }}
+                            >
+                              Open Gmail Drafts <ExternalLink size={12} />
+                            </a>
+                          </div>
+                          <div style={{ fontSize: '0.72rem', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                            Created draft for <strong>{msg.sender}</strong>. The system never sends emails automatically; please review in Gmail and send.
+                          </div>
+                          <div
+                            style={{
+                              fontSize: '0.8rem',
+                              color: 'var(--text-secondary)',
+                              background: 'rgba(0,0,0,0.2)',
+                              padding: '10px 12px',
+                              borderRadius: 'var(--radius-sm)',
+                              whiteSpace: 'pre-wrap',
+                              fontFamily: 'monospace',
+                            }}
+                          >
+                            {editedReplies[msg.id] || msg.suggested_reply || 'Draft text submitted.'}
+                          </div>
+                        </div>
+                      ) : (msg.action_taken === 'acknowledged' || (actionSuccess[msg.id] && !actionSuccess[msg.id]?.draftId)) ? (
+                        /* Case B: Already acknowledged */
+                        <div
+                          style={{
+                            background: 'rgba(255, 255, 255, 0.03)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: 'var(--radius-md)',
+                            padding: '12px 16px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '8px',
+                            color: 'var(--text-secondary)',
+                            fontSize: '0.8rem',
+                          }}
+                        >
+                          <CheckCircle2 size={14} color="var(--emerald-400)" />
+                          Message acknowledged. Application status updated to{' '}
+                          <strong style={{ color: 'var(--text-primary)' }}>
+                            {(msg.opportunity_status || actionSuccess[msg.id]?.newStatus || 'rejected_by_recruiter').replace(/_/g, ' ')}
+                          </strong>.
+                        </div>
+                      ) : (
+                        /* Case C: Pending human review & action */
+                        <div>
+                          {!msg.application_id ? (
+                            <div
+                              style={{
+                                fontSize: '0.78rem',
+                                color: 'var(--amber-400)',
+                                background: 'rgba(245, 158, 11, 0.08)',
+                                padding: '10px 14px',
+                                borderRadius: 'var(--radius-md)',
+                                border: '1px solid rgba(245, 158, 11, 0.2)',
+                              }}
+                            >
+                              ⚠️ Unlinked message. Link this email to an application record before generating replies or updating status.
+                            </div>
+                          ) : isReplyBearing(msg.classification) ? (
+                            /* Reply-bearing flow */
+                            <div>
+                              <div
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  justifyContent: 'space-between',
+                                  marginBottom: '8px',
+                                }}
+                              >
+                                <div style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                  <Sparkles size={13} color="#c4b5fd" /> Suggested Reply (AI Draft)
+                                </div>
+                                <div style={{ fontSize: '0.7rem', color: 'var(--text-tertiary)' }}>
+                                  Hard Invariant: System only drafts — you send in Gmail
+                                </div>
+                              </div>
+
+                              {(msg.suggested_reply || editedReplies[msg.id] !== undefined) ? (
+                                <div>
+                                  <textarea
+                                    value={
+                                      editedReplies[msg.id] !== undefined
+                                        ? editedReplies[msg.id]
+                                        : msg.suggested_reply || ''
+                                    }
+                                    onChange={(e) =>
+                                      setEditedReplies((prev) => ({
+                                        ...prev,
+                                        [msg.id]: e.target.value,
+                                      }))
+                                    }
+                                    rows={5}
+                                    style={{
+                                      width: '100%',
+                                      padding: '10px 12px',
+                                      background: 'rgba(0, 0, 0, 0.25)',
+                                      border: '1px solid var(--border-medium)',
+                                      borderRadius: 'var(--radius-md)',
+                                      color: 'var(--text-primary)',
+                                      fontSize: '0.82rem',
+                                      fontFamily: 'inherit',
+                                      lineHeight: 1.5,
+                                      resize: 'vertical',
+                                      marginBottom: '10px',
+                                    }}
+                                  />
+                                  <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                                    <button
+                                      disabled={actionLoading[msg.id] !== null}
+                                      onClick={(e) => handleApproveReply(msg, e)}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '6px',
+                                        padding: '8px 16px',
+                                        borderRadius: 'var(--radius-md)',
+                                        background: 'var(--emerald-500, #10b981)',
+                                        color: '#fff',
+                                        border: 'none',
+                                        fontWeight: 600,
+                                        fontSize: '0.8rem',
+                                        cursor: actionLoading[msg.id] ? 'not-allowed' : 'pointer',
+                                        opacity: actionLoading[msg.id] ? 0.7 : 1,
+                                      }}
+                                    >
+                                      <Send size={13} />
+                                      {actionLoading[msg.id] === 'approve'
+                                        ? 'Creating Gmail draft...'
+                                        : 'Approve & create draft'}
+                                    </button>
+
+                                    <button
+                                      disabled={actionLoading[msg.id] !== null}
+                                      onClick={(e) => handleDraftReply(msg.id, e)}
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '5px',
+                                        padding: '8px 12px',
+                                        borderRadius: 'var(--radius-md)',
+                                        background: 'rgba(255, 255, 255, 0.05)',
+                                        color: 'var(--text-secondary)',
+                                        border: '1px solid var(--border-subtle)',
+                                        fontSize: '0.78rem',
+                                        cursor: actionLoading[msg.id] ? 'not-allowed' : 'pointer',
+                                      }}
+                                    >
+                                      <RefreshCw size={12} className={actionLoading[msg.id] === 'draft' ? 'animate-spin' : ''} />
+                                      Re-draft with Gemini
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'space-between',
+                                    padding: '12px 14px',
+                                    background: 'rgba(139, 92, 246, 0.08)',
+                                    borderRadius: 'var(--radius-md)',
+                                    border: '1px solid rgba(139, 92, 246, 0.2)',
+                                  }}
+                                >
+                                  <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                                    This message invites a response. Draft an AI-assisted reply tailored to the role and candidate profile.
+                                  </div>
+                                  <button
+                                    disabled={actionLoading[msg.id] !== null}
+                                    onClick={(e) => handleDraftReply(msg.id, e)}
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      gap: '6px',
+                                      padding: '7px 14px',
+                                      borderRadius: 'var(--radius-md)',
+                                      background: 'rgba(139, 92, 246, 0.2)',
+                                      color: '#c4b5fd',
+                                      border: '1px solid rgba(139, 92, 246, 0.4)',
+                                      fontSize: '0.78rem',
+                                      fontWeight: 600,
+                                      cursor: actionLoading[msg.id] ? 'not-allowed' : 'pointer',
+                                      flexShrink: 0,
+                                    }}
+                                  >
+                                    <Sparkles size={13} />
+                                    {actionLoading[msg.id] === 'draft' ? 'Drafting...' : 'Draft reply with Gemini'}
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            /* Non-reply flow (e.g. rejection) */
+                            <div
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'space-between',
+                                padding: '12px 16px',
+                                background: 'rgba(239, 68, 68, 0.06)',
+                                borderRadius: 'var(--radius-md)',
+                                border: '1px solid rgba(239, 68, 68, 0.2)',
+                              }}
+                            >
+                              <div>
+                                <div style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '2px' }}>
+                                  Terminal / Non-reply Message
+                                </div>
+                                <div style={{ fontSize: '0.74rem', color: 'var(--text-tertiary)' }}>
+                                  No reply required. Acknowledge to update application status to{' '}
+                                  <strong style={{ color: '#f87171' }}>
+                                    {msg.classification === 'rejection' ? 'Rejected by Recruiter' : 'Acknowledged'}
+                                  </strong>.
+                                </div>
+                              </div>
+                              <button
+                                disabled={actionLoading[msg.id] !== null}
+                                onClick={(e) => handleAcknowledge(msg.id, e)}
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '6px',
+                                  padding: '8px 16px',
+                                  borderRadius: 'var(--radius-md)',
+                                  background: 'rgba(239, 68, 68, 0.15)',
+                                  color: '#f87171',
+                                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                                  fontSize: '0.78rem',
+                                  fontWeight: 600,
+                                  cursor: actionLoading[msg.id] ? 'not-allowed' : 'pointer',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                <Check size={13} />
+                                {actionLoading[msg.id] === 'ack' ? 'Updating status...' : 'Acknowledge'}
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+
                   </div>
                 )}
               </div>

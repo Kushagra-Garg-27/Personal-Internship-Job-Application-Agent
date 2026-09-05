@@ -31,10 +31,44 @@ class MessageResponse(BaseModel):
     updated_at: datetime
 
     # Nested opportunity info when available
+    opportunity_id: int | None = None
     opportunity_title: str | None = None
     opportunity_company: str | None = None
+    opportunity_status: str | None = None
+
+    # Phase 10: Response Loop
+    suggested_reply: str | None = None
+    draft_id: str | None = None
+    action_taken: str | None = None
+    action_taken_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ApproveReplyRequest(BaseModel):
+    """Payload for approving and creating a Gmail draft for a suggested reply."""
+
+    edited_reply: str | None = None
+
+
+class ApproveReplyResponse(BaseModel):
+    """Result of approving a reply draft."""
+
+    message: MessageResponse
+    opportunity_id: int
+    opportunity_status: str
+    draft_id: str
+    detail: str = "Draft created in Gmail. Open Gmail to send."
+
+
+class AcknowledgeMessageResponse(BaseModel):
+    """Result of acknowledging a recruiter message."""
+
+    message: MessageResponse
+    opportunity_id: int
+    opportunity_status: str
+    detail: str = "Message acknowledged and opportunity status updated."
+
 
 
 class MessageListResponse(BaseModel):

@@ -23,7 +23,16 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+# Gmail OAuth Scopes
+# Hard architectural invariant (Phase 10):
+# Strictly limited to readonly and compose (drafts). "gmail.send" is DELIBERATELY
+# EXCLUDED so that the system credentials are structurally incapable of sending emails.
+# The system only creates drafts; the human physically opens Gmail and hits Send.
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+]
+
 
 
 def _load_credentials(

@@ -105,6 +105,16 @@ class RecruiterMessage(TimestampMixin, Base):
     # ── Debug metadata ───────────────────────────────────────────────
     raw_headers_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
+    # ── Phase 10: Response Loop ──────────────────────────────────────
+    suggested_reply: Mapped[str | None] = mapped_column(Text, nullable=True)
+    draft_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    action_taken: Mapped[str | None] = mapped_column(
+        String(50), nullable=True
+    )  # "approved", "acknowledged"
+    action_taken_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     # ── Relationships ────────────────────────────────────────────────
     application: Mapped["Application | None"] = relationship(  # noqa: F821
         lazy="selectin",

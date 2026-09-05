@@ -23,7 +23,9 @@ LINKABLE_STATUSES = {
     OpportunityStatus.APPLIED.value,
     OpportunityStatus.SUBMITTED.value,
     OpportunityStatus.INTERVIEW.value,
+    OpportunityStatus.INTERVIEW_SCHEDULED.value,
     OpportunityStatus.OFFERED.value,
+    OpportunityStatus.OFFER_RECEIVED.value,
 }
 
 
