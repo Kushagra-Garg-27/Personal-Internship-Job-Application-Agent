@@ -1,0 +1,36 @@
+"""SQLAlchemy engine, session factory, and WAL-mode setup for SQLite."""
+
+from sqlalchemy import event, create_engine
+from sqlalchemy.orm import sessionmaker, Session
+
+from core.config import settings
+
+
+engine = create_engine(
+    settings.DATABASE_URL,
+    # SQLite does not support pool_size/max_overflow in the same way as
+    # server-based DBs, but we keep connect_args for thread-safety.
+    connect_args={"check_same_thread": False},
+    echo=False,
+)
+
+
+@event.listens_for(engine, "connect")
+def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+    """Enable WAL mode and foreign-key enforcement on every new connection."""
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+
+def get_db() -> Session:  # type: ignore[misc]
+    """FastAPI dependency — yields a scoped session, closes on teardown."""
+    db = SessionLocal()
+    try:
+        yield db  # type: ignore[misc]
+    finally:
+        db.close()

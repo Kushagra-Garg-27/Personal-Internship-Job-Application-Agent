@@ -1,0 +1,57 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+5 0 obj
+<< /Length 537 >>
+stream
+BT
+/F1 12 Tf
+72 720 Td
+(John Doe) Tj
+0 -16 Td
+(Software Engineer) Tj
+0 -16 Td
+(john.doe@example.com | \(555\) 123-4567) Tj
+0 -16 Td
+(Education) Tj
+0 -16 Td
+(B.Tech in Computer Science, Example University, 2024) Tj
+0 -16 Td
+(Skills) Tj
+0 -16 Td
+(Python, FastAPI, SQLAlchemy, PostgreSQL, Docker, Git) Tj
+0 -16 Td
+(Experience) Tj
+0 -16 Td
+(Software Engineering Intern at TechCorp \(May 2023 - Aug 2023\)) Tj
+0 -16 Td
+(- Built REST APIs serving 10k requests/day) Tj
+0 -16 Td
+(- Implemented CI/CD pipelines with GitHub Actions) Tj
+0 -16 Td
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+899
+%%EOF
