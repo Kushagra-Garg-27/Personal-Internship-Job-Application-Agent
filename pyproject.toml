@@ -1,6 +1,6 @@
 [project]
 name = "job-app-agent"
-version = "0.4.0"
+version = "0.5.0"
 description = "Personal Job/Internship Application Agent — Career Intelligence Core"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +24,9 @@ dependencies = [
     # Phase 4: relevance scoring
     "sentence-transformers>=2.2",
     "torch>=2.0",
+    # Phase 5: scam/risk filter
+    "google-genai>=1.0",
+    "python-whois>=0.9",
 ]
 
 [project.optional-dependencies]

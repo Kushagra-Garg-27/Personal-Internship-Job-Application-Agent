@@ -16,6 +16,11 @@ class ScoringVerdictResponse(BaseModel):
     profile_id: int | None = None
     eligibility_passed: bool
     eligibility_reason: dict[str, Any] | None = None
+    scam_verdict: str | None = None
+    scam_reason: dict[str, Any] | None = None
+    llm_verdict: str | None = None
+    llm_reasoning: str | None = None
+    quota_deferred_at: datetime | None = None
     relevance_score: float | None = None
     relevance_explanation: dict[str, Any] | None = None
     funnel_completed_at: datetime | None = None

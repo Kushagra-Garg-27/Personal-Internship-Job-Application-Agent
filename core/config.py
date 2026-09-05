@@ -58,6 +58,71 @@ class Settings(BaseSettings):
     FUNNEL_EVALUATOR_INTERVAL: int = 300    # 5 minutes
     FUNNEL_SCORE_THRESHOLD: float = 0.0
 
+    # ── Scam / Risk (Phase 5) ─────────────────────────────────────────
+    GEMINI_API_KEY: str | None = None
+    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_DAILY_QUOTA: int = 1500
+
+    # High-confidence hard rejection phrases
+    SCAM_BLOCKLIST_KEYWORDS: list[str] = [
+        "registration fee",
+        "application fee required",
+        "security deposit required",
+        "refundable deposit",
+        "training fee required",
+        "wire transfer required",
+        "wire transfer",
+        "wire money",
+        "western union",
+        "moneygram",
+        "crypto payment required",
+        "crypto payment",
+        "crypto transfer",
+        "pay for background check",
+        "pay upfront",
+        "upfront fee",
+        "buy equipment from our vendor",
+        "buy your own equipment",
+        "buy equipment and we will reimburse",
+        "multilevel marketing",
+        "pyramid scheme",
+        "cashier's check reimbursement",
+    ]
+
+    # Borderline / weak signals (trigger ambiguity for LLM evaluation)
+    SCAM_SUSPICIOUS_KEYWORDS: list[str] = [
+        "earn $5000",
+        "earn $1000 daily",
+        "no experience required earn",
+        "whatsapp interview",
+        "telegram interview",
+        "contact on telegram",
+        "contact on whatsapp",
+        "investment required",
+        "package forwarding",
+        "mystery shopper",
+        "immediate start no interview",
+        "no interview required",
+        "urgent hiring",
+        "guaranteed income",
+    ]
+
+    FREE_EMAIL_DOMAINS: list[str] = [
+        "gmail.com",
+        "yahoo.com",
+        "hotmail.com",
+        "outlook.com",
+        "aol.com",
+        "icloud.com",
+        "zoho.com",
+        "proton.me",
+        "protonmail.com",
+        "mail.com",
+        "yandex.com",
+    ]
+
+    WHOIS_MIN_DOMAIN_AGE_DAYS: int = 30
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

@@ -42,6 +42,11 @@ def upsert_verdict(
     profile_id: int | None = None,
     eligibility_passed: bool,
     eligibility_reason: dict | None = None,
+    scam_verdict: str | None = None,
+    scam_reason: dict | None = None,
+    llm_verdict: str | None = None,
+    llm_reasoning: str | None = None,
+    quota_deferred_at: Any = None,
     relevance_score: float | None = None,
     relevance_explanation: dict | None = None,
     funnel_completed_at: Any = None,
@@ -55,6 +60,11 @@ def upsert_verdict(
             profile_id=profile_id,
             eligibility_passed=eligibility_passed,
             eligibility_reason=eligibility_reason,
+            scam_verdict=scam_verdict,
+            scam_reason=scam_reason,
+            llm_verdict=llm_verdict,
+            llm_reasoning=llm_reasoning,
+            quota_deferred_at=quota_deferred_at,
             relevance_score=relevance_score,
             relevance_explanation=relevance_explanation,
             funnel_completed_at=funnel_completed_at,
@@ -65,6 +75,16 @@ def upsert_verdict(
         verdict.profile_id = profile_id
         verdict.eligibility_passed = eligibility_passed
         verdict.eligibility_reason = eligibility_reason
+        if scam_verdict is not None:
+            verdict.scam_verdict = scam_verdict
+        if scam_reason is not None:
+            verdict.scam_reason = scam_reason
+        if llm_verdict is not None:
+            verdict.llm_verdict = llm_verdict
+        if llm_reasoning is not None:
+            verdict.llm_reasoning = llm_reasoning
+        if quota_deferred_at is not None:
+            verdict.quota_deferred_at = quota_deferred_at
         verdict.relevance_score = relevance_score
         verdict.relevance_explanation = relevance_explanation
         verdict.funnel_completed_at = funnel_completed_at

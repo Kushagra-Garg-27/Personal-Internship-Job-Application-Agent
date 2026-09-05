@@ -7,6 +7,7 @@ from core.models.base import Base, TimestampMixin
 from core.models.profile import Profile, ProfileEducation, ProfileLink, ProfileSkill
 from core.models.resume import Resume
 from core.models.opportunity import Application, Opportunity, StatusHistory
+from core.models.scam_signature import ScamContentSignature
 from core.models.scoring import ScoringVerdict
 
 __all__ = [
@@ -24,4 +25,6 @@ __all__ = [
     "Application",
     # Phase 4
     "ScoringVerdict",
+    # Phase 5
+    "ScamContentSignature",
 ]

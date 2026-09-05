@@ -17,24 +17,29 @@ from sqlalchemy.orm import Session
 from core.funnel.base import FunnelRunner, FunnelStage
 from core.funnel.eligibility import EligibilityStage
 from core.funnel.relevance import RelevanceStage
+from core.funnel.scam_risk.rules import compute_content_hash
+from core.funnel.scam_risk.stage import ScamRiskStage
 from core.models.opportunity import Opportunity
 from core.models.profile import Profile
 from core.models.scoring import ScoringVerdict
-from core.repositories import profile_repo, scoring_repo
+from core.repositories import profile_repo, scam_signature_repo, scoring_repo
 from core.services import opportunity_service
 from core.status import OpportunityStatus
 
 logger = logging.getLogger(__name__)
 
 
-def build_default_runner() -> FunnelRunner:
-    """Build the standard 2-stage funnel runner (Phase 4).
+def build_default_runner(session: Session | None = None) -> FunnelRunner:
+    """Build the standard 3-stage funnel runner (Phase 5).
 
-    Phase 5's scam/risk filter will be inserted between these two stages.
+    Stages:
+        1. EligibilityStage (deterministic pre-qualification)
+        2. ScamRiskStage (deterministic scam rules + Gemini for ambiguous)
+        3. RelevanceStage (semantic profile-job matching)
     """
     stages: list[FunnelStage] = [
         EligibilityStage(),
-        # ScamRiskStage will slot in here in Phase 5
+        ScamRiskStage(session=session),
         RelevanceStage(),
     ]
     return FunnelRunner(stages=stages)
@@ -53,7 +58,8 @@ def evaluate_opportunity(
 
     1. Executes stages in order with hard short-circuit on failure.
     2. Persists or updates the resulting `ScoringVerdict`.
-    3. Atomically updates opportunity status (DISCOVERED -> INELIGIBLE or RECOMMENDED).
+    3. Atomically updates opportunity status (DISCOVERED -> INELIGIBLE,
+       SCAM_RISK_REJECTED, SCAM_REVIEW_PENDING, or RECOMMENDED).
 
     Returns:
         The persisted `ScoringVerdict`.
@@ -84,7 +90,7 @@ def evaluate_opportunity(
                     break
 
     # Run funnel stages
-    active_runner = runner or build_default_runner()
+    active_runner = runner or build_default_runner(session=session)
     verdicts = active_runner.run(
         opportunity=opportunity,
         profile=active_profile,
@@ -127,7 +133,120 @@ def evaluate_opportunity(
 
         return verdict
 
-    # Eligibility passed — retrieve relevance score
+    # Check Stage 2: Scam / Risk Filter
+    scam_verdict = next((v for v in verdicts if v.stage_name == "scam_risk"), None)
+    scam_verdict_str: str | None = None
+    scam_reason_dict: dict[str, Any] | None = None
+
+    if scam_verdict is not None:
+        payload = scam_verdict.payload or {}
+        scam_outcome = payload.get("verdict")
+
+        if not scam_verdict.passed:
+            # 1. Deterministic hard reject
+            if scam_outcome == "reject":
+                scam_verdict_str = "reject"
+                scam_reason_dict = scam_verdict.reason or {
+                    "rule": "deterministic_scam_filter",
+                    "detail": "Listing matched scam rules",
+                }
+
+                # Persist content hash into scam_content_signatures
+                if getattr(opportunity, "description", None):
+                    chash = compute_content_hash(opportunity.description)
+                    existing_sig = scam_signature_repo.get_by_hash(session, chash)
+                    if not existing_sig:
+                        scam_signature_repo.create_signature(
+                            session,
+                            content_hash=chash,
+                            opportunity_id=opportunity.id,
+                            rule_name=scam_reason_dict.get("rule", "deterministic_scam_filter"),
+                            confirmed_scam=True,
+                            notes=scam_reason_dict.get("detail"),
+                        )
+
+                verdict = scoring_repo.upsert_verdict(
+                    session,
+                    opportunity_id=opportunity.id,
+                    profile_id=active_profile.id if active_profile else None,
+                    eligibility_passed=True,
+                    scam_verdict="reject",
+                    scam_reason=scam_reason_dict,
+                    funnel_completed_at=completed_at,
+                )
+
+                if opportunity.status == OpportunityStatus.DISCOVERED:
+                    detail = scam_reason_dict.get("detail", "Failed scam/risk filter")
+                    opportunity_service.transition_status(
+                        session,
+                        opportunity_id=opportunity.id,
+                        new_status=OpportunityStatus.SCAM_RISK_REJECTED,
+                        reason=f"Scam risk rejected: {detail}",
+                        actor=actor,
+                    )
+
+                return verdict
+
+            # 2. Ambiguous: HALT for human review (never auto-commit)
+            elif scam_outcome == "ambiguous":
+                scam_verdict_str = "ambiguous"
+                scam_reason_dict = scam_verdict.reason or {
+                    "rule": "ambiguous_scam_review",
+                    "detail": "Listing flagged for human review",
+                }
+                llm_v = payload.get("llm_verdict")
+                llm_r = payload.get("llm_reasoning")
+
+                verdict = scoring_repo.upsert_verdict(
+                    session,
+                    opportunity_id=opportunity.id,
+                    profile_id=active_profile.id if active_profile else None,
+                    eligibility_passed=True,
+                    scam_verdict="ambiguous",
+                    scam_reason=scam_reason_dict,
+                    llm_verdict=llm_v,
+                    llm_reasoning=llm_r,
+                    funnel_completed_at=completed_at,
+                )
+
+                if opportunity.status == OpportunityStatus.DISCOVERED:
+                    detail = scam_reason_dict.get("detail", "Flagged for human review")
+                    opportunity_service.transition_status(
+                        session,
+                        opportunity_id=opportunity.id,
+                        new_status=OpportunityStatus.SCAM_REVIEW_PENDING,
+                        reason=f"Scam review pending: {detail}",
+                        actor=actor,
+                    )
+
+                return verdict
+
+            # 3. Quota exhausted or LLM failure: Fail-closed deferral
+            elif scam_outcome == "deferred":
+                scam_verdict_str = "deferred"
+                scam_reason_dict = scam_verdict.reason or {
+                    "rule": "gemini_eval_deferred",
+                    "detail": "Evaluation deferred",
+                }
+
+                verdict = scoring_repo.upsert_verdict(
+                    session,
+                    opportunity_id=opportunity.id,
+                    profile_id=active_profile.id if active_profile else None,
+                    eligibility_passed=True,
+                    scam_verdict="deferred",
+                    scam_reason=scam_reason_dict,
+                    quota_deferred_at=completed_at,
+                    funnel_completed_at=completed_at,
+                )
+                # Fail-closed: stays in DISCOVERED without transitioning to recommended/rejected
+                return verdict
+
+        else:
+            # Passed scam risk stage
+            scam_verdict_str = "clear"
+
+    # Stage 3: Relevance scoring
     relevance_verdict = next((v for v in verdicts if v.stage_name == "relevance"), None)
     rel_score: float | None = None
     rel_explanation: dict[str, Any] | None = None
@@ -144,6 +263,8 @@ def evaluate_opportunity(
         profile_id=active_profile.id if active_profile else None,
         eligibility_passed=True,
         eligibility_reason=None,
+        scam_verdict=scam_verdict_str,
+        scam_reason=scam_reason_dict,
         relevance_score=rel_score,
         relevance_explanation=rel_explanation,
         funnel_completed_at=completed_at,
@@ -157,7 +278,7 @@ def evaluate_opportunity(
                 session,
                 opportunity_id=opportunity.id,
                 new_status=OpportunityStatus.RECOMMENDED,
-                reason=f"Passed eligibility; relevance score: {rel_score:.4f}",
+                reason=f"Passed eligibility and scam filter; relevance score: {rel_score:.4f}",
                 actor=actor,
             )
 

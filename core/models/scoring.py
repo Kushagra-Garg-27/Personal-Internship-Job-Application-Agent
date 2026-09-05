@@ -16,6 +16,7 @@ from sqlalchemy import (
     Integer,
     JSON,
     String,
+    Text,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -48,8 +49,15 @@ class ScoringVerdict(TimestampMixin, Base):
     eligibility_passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     eligibility_reason: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
-    # ── Relevance score (Stage 2/3 - local embeddings) ────────────────
-    # NULL if eligibility failed — relevance is never evaluated on ineligible jobs
+    # ── Scam / Risk verdict (Stage 2 - Phase 5) ───────────────────────
+    scam_verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)  # "clear", "reject", "ambiguous"
+    scam_reason: Mapped[dict | None] = mapped_column(JSON, nullable=True)        # rule name, matched signals
+    llm_verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)   # "scam", "legitimate", "suspicious"
+    llm_reasoning: Mapped[str | None] = mapped_column(Text, nullable=True)       # inspectable stated reason
+    quota_deferred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # ── Relevance score (Stage 3 - local embeddings) ──────────────────
+    # NULL if eligibility or scam/risk failed — never evaluated on rejected jobs
     relevance_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     relevance_explanation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 

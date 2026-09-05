@@ -18,6 +18,7 @@ from core.funnel.runner import (
     evaluate_opportunity,
     run_funnel_batch,
 )
+from core.funnel.scam_risk import ScamRiskStage
 
 __all__ = [
     "FunnelRunner",
@@ -29,6 +30,7 @@ __all__ = [
     "check_degree",
     "check_location",
     "check_salary_floor",
+    "ScamRiskStage",
     "RelevanceStage",
     "RelevanceScorer",
     "build_default_runner",

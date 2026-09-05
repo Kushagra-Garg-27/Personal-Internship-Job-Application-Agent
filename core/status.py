@@ -27,6 +27,7 @@ class OpportunityStatus(StrEnum):
     DISCOVERED = "discovered"
     INELIGIBLE = "ineligible"
     SCAM_RISK_REJECTED = "scam_risk_rejected"
+    SCAM_REVIEW_PENDING = "scam_review_pending"
 
     # ── Scoring & review ──────────────────────────────────────────────
     RECOMMENDED = "recommended"
@@ -68,13 +69,15 @@ class ReliabilityTier(StrEnum):
 #   ineligible → discovered        (criteria changed)
 #   scam_risk_rejected → discovered (false positive corrected)
 #   rejected_by_user → recommended  (user reconsidered)
+#   scam_review_pending → recommended / scam_risk_rejected (human decision)
 
 S = OpportunityStatus  # short alias for readability
 
 ALLOWED_TRANSITIONS: dict[OpportunityStatus, set[OpportunityStatus]] = {
-    S.DISCOVERED: {S.RECOMMENDED, S.INELIGIBLE, S.EXPIRED, S.SCAM_RISK_REJECTED},
+    S.DISCOVERED: {S.RECOMMENDED, S.INELIGIBLE, S.EXPIRED, S.SCAM_RISK_REJECTED, S.SCAM_REVIEW_PENDING},
     S.INELIGIBLE: {S.DISCOVERED},
     S.SCAM_RISK_REJECTED: {S.DISCOVERED},
+    S.SCAM_REVIEW_PENDING: {S.SCAM_RISK_REJECTED, S.RECOMMENDED, S.DISCOVERED, S.EXPIRED},
     S.RECOMMENDED: {S.READY_TO_APPLY, S.REJECTED_BY_USER, S.EXPIRED, S.SCAM_RISK_REJECTED},
     S.REJECTED_BY_USER: {S.RECOMMENDED},
     S.READY_TO_APPLY: {S.APPLIED, S.EXPIRED, S.REJECTED_BY_USER, S.WITHDRAWN},

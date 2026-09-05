@@ -6,17 +6,17 @@ The **Career Intelligence Core** — a Python/FastAPI backend for managing user 
 
 | Layer | Description |
 |---|---|
-| **SQLAlchemy Models** | `profiles` + children, `resumes`, `opportunities`, `status_history`, `applications`, `scoring_verdicts` (9 tables total) |
-| **Alembic Migrations** | Three migrations (0001 + 0002 + 0003) in a chain; ready for future schema growth |
-| **Repository Layer** | `profile_repo`, `resume_repo`, `opportunity_repo`, `status_history_repo`, `application_repo`, `scoring_repo` |
-| **Service Layer** | Profile/resume services + opportunity transition engine + funnel orchestrator |
+| **SQLAlchemy Models** | `profiles` + children, `resumes`, `opportunities`, `status_history`, `applications`, `scoring_verdicts`, `scam_content_signatures` (10 tables total) |
+| **Alembic Migrations** | Four migrations (0001 + 0002 + 0003 + 0004) in a chain; ready for future schema growth |
+| **Repository Layer** | `profile_repo`, `resume_repo`, `opportunity_repo`, `status_history_repo`, `application_repo`, `scoring_repo`, `scam_signature_repo` |
+| **Service Layer** | Profile/resume services + opportunity transition engine + funnel orchestrator + scam review service |
 | **Resume Parser** | Deterministic text extraction from PDF/DOCX via `pypdf`/`python-docx` with fail-closed logic |
-| **Status Machine** | 14-status lifecycle with enforced transition map, audit trail, and idempotency primitives |
+| **Status Machine** | 15-status lifecycle with enforced transition map, audit trail, and idempotency primitives |
 | **Discovery Adapters** | Greenhouse, Lever (stable), RSS feeds (stable), Gmail job alerts (discovery_only) |
-| **Multi-Stage Funnel** | Pluggable pipeline: deterministic eligibility filtering -> local `all-MiniLM-L6-v2` relevance scoring |
+| **Multi-Stage Funnel** | 3-stage pipeline: deterministic eligibility -> deterministic scam/risk filter + Gemini for ambiguous -> local relevance |
 | **Scheduler** | APScheduler with independent per-source discovery jobs and periodic funnel batch evaluations |
-| **FastAPI API** | CRUD endpoints + discovery status + status transitions + applications + scoring verdicts |
-| **Test Suite** | 238 pytest tests — repos, parser, status transitions, adapters, pipeline, scheduler, eligibility, relevance, funnel, API |
+| **FastAPI API** | CRUD endpoints + discovery status + status transitions + applications + scoring verdicts + scam review |
+| **Test Suite** | 283 pytest tests — repos, parser, status transitions, adapters, pipeline, scheduler, eligibility, relevance, scam rules, gemini client, review API, funnel |
 
 ## Quick Start
 
@@ -273,5 +273,62 @@ If eligibility fails, the opportunity transitions `discovered -> ineligible`, st
 |---|---|---|
 | `GET` | `/opportunities/{id}/verdict` | Fetch latest scoring verdict and explanation |
 | `POST` | `/opportunities/{id}/evaluate` | Run evaluation funnel on an opportunity on demand |
+
+## Phase 5 — Scam & Risk Filter Stage (Stage 2)
+
+Phase 5 inserts Stage 2 of the 5-stage funnel (§5.2) directly between Stage 1 Eligibility and Stage 3 Relevance:
+`FUNNEL_STAGES = [eligibility_stage, scam_risk_stage, relevance_stage]`
+
+It adheres to strict economic and safety principles: deterministic rules first with zero AI cost, reserving the Gemini Developer API (free tier) strictly for the genuinely ambiguous minority (~10–20%). Ambiguous listings halt for mandatory human review—never auto-committing.
+
+```
+Stage 1: Eligibility Filter (deterministic) ────────► [Phase 4]
+         │ (Pass)
+         ▼
+Stage 2: Scam/Risk Filter ──────────────────────────► [Phase 5]
+         ├── Deterministic Rules:
+         │   ├── Duplicate Content Hash (`scam_content_signatures`)
+         │   ├── Keyword Blocklist (wire money, crypto transfer, upfront fees)
+         │   ├── Free Email Recruiter Pattern (corporate brand impersonation)
+         │   └── WHOIS Domain Age (< 30 days old flag)
+         │
+         ├── Outcomes:
+         │   ├── Clear ─────────────► Proceeds to Stage 3 Relevance
+         │   ├── Hard Reject ───────► SCAM_RISK_REJECTED + Hash stored in DB
+         │   └── Ambiguous ─────────► Escalate to Gemini Free Tier (Stage 4)
+         │                              │
+         │                              ▼
+         │                        Fail-Closed Halt: SCAM_REVIEW_PENDING
+         │                        (Awaiting human approval/rejection)
+         │
+         ▼ (Pass)
+Stage 3: Relevance Scoring (local embeddings) ──────► [Phase 4]
+```
+
+### Deterministic Rules (`core/funnel/scam_risk/rules.py`)
+
+1. **Duplicate Content Signature Store**: Normalized SHA-256 hash comparison against confirmed scam signatures in `scam_content_signatures`. Matching confirmed signatures triggers instant rejection without AI.
+2. **Keyword Blocklist**: Hard rejection on explicit financial or fraudulent demands (`wire money`, `western union`, `crypto transfer`, `pay upfront`, `buy equipment from our vendor`). Suspicious phrases trigger ambiguous classification for LLM analysis.
+3. **Free Email Recruiter Impersonation**: Corporate brand names recruiting through free consumer domains (`@gmail.com`, `@yahoo.com`, etc.) trigger immediate rejection. Generic listings provide ambiguous signals.
+4. **WHOIS Domain Age**: Newly registered domains (< 30 days old) are flagged as ambiguous. Established job platforms (LinkedIn, Greenhouse, Lever, etc.) are whitelisted and skip WHOIS lookups.
+
+### Gemini Analysis Client (`core/funnel/scam_risk/gemini_client.py`)
+
+- **Quota Enforcement**: Tracks daily usage against free tier limit (1500 calls/day) with automatic midnight UTC rollover.
+- **Fail-Closed Guarantee**: If the daily quota is exhausted or an API error occurs, evaluation is deferred (`quota_deferred_at`), preserving the listing in `discovered` rather than silently passing or rejecting.
+- **Human Approval Barrier**: LLM evaluations halt in `scam_review_pending`—never directly committing to `recommended` or `scam_risk_rejected`.
+
+### Closed-Loop Learning Feedback Loop
+
+When a human reviewer reviews an ambiguous listing and rejects it, its content hash is saved into `scam_content_signatures`. Subsequent postings with identical content (even from different posters or platforms) are automatically auto-rejected at Stage 2 with zero AI cost.
+
+### Scam Review Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/opportunities/scam-review/pending` | List opportunities awaiting human scam/risk review |
+| `POST` | `/opportunities/{id}/scam-review/approve` | Approve listing, evaluate Stage 3 relevance, and transition to `recommended` |
+| `POST` | `/opportunities/{id}/scam-review/reject` | Reject listing, store body hash in `scam_content_signatures`, and transition to `scam_risk_rejected` |
+
 
 

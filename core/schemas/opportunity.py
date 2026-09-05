@@ -98,6 +98,19 @@ class StatusHistoryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ScamReviewApproveRequest(BaseModel):
+    """Input for human review approval."""
+
+    actor: str = "human_reviewer"
+
+
+class ScamReviewRejectRequest(BaseModel):
+    """Input for human review rejection."""
+
+    reason: str = "Rejected during human review"
+    actor: str = "human_reviewer"
+
+
 # ── Application schemas ──────────────────────────────────────────────────
 
 
