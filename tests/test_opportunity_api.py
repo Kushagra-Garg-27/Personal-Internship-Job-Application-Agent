@@ -211,3 +211,46 @@ class TestApplicationEndpoints:
     def test_create_application_for_nonexistent_opportunity(self, client):
         resp = client.post("/opportunities/99999/applications", json={})
         assert resp.status_code == 404
+
+
+class TestVerdictEndpoints:
+    def test_get_verdict_not_found(self, client):
+        # Create opportunity
+        r = client.post("/opportunities/", json={
+            "title": "Data Scientist",
+            "company": "AI Labs",
+            "url": "https://ailabs.com/ds",
+        })
+        oid = r.json()["id"]
+
+        # No verdict yet -> 404
+        resp = client.get(f"/opportunities/{oid}/verdict")
+        assert resp.status_code == 404
+
+    def test_evaluate_opportunity_and_fetch_verdict(self, client):
+        # Create opportunity
+        r = client.post("/opportunities/", json={
+            "title": "Python Developer",
+            "company": "FastAPI Inc",
+            "url": "https://fastapi.org/jobs/1",
+            "description": "Python developer needed for REST APIs.",
+        })
+        oid = r.json()["id"]
+
+        # Trigger evaluation
+        eval_resp = client.post(f"/opportunities/{oid}/evaluate")
+        assert eval_resp.status_code == 200
+        data = eval_resp.json()
+        assert data["opportunity_id"] == oid
+        assert "eligibility_passed" in data
+        assert data["eligibility_passed"] is True
+
+        # Fetch verdict
+        get_resp = client.get(f"/opportunities/{oid}/verdict")
+        assert get_resp.status_code == 200
+        assert get_resp.json()["id"] == data["id"]
+
+    def test_verdict_endpoints_nonexistent_opportunity(self, client):
+        assert client.get("/opportunities/99999/verdict").status_code == 404
+        assert client.post("/opportunities/99999/evaluate").status_code == 404
+

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from api.deps import get_db
-from core.repositories import opportunity_repo, status_history_repo
+from core.repositories import opportunity_repo, scoring_repo, status_history_repo
 from core.schemas.opportunity import (
     OpportunityCreate,
     OpportunityResponse,
@@ -14,6 +14,7 @@ from core.schemas.opportunity import (
     StatusHistoryResponse,
     StatusTransitionRequest,
 )
+from core.schemas.scoring import ScoringVerdictResponse
 from core.services import opportunity_service
 from core.status import InvalidTransitionError
 
@@ -128,3 +129,33 @@ def get_status_history(opportunity_id: int, db: Session = Depends(get_db)):
     if opp is None:
         raise HTTPException(status_code=404, detail="Opportunity not found.")
     return status_history_repo.get_history(db, opportunity_id)
+
+
+# ── Scoring verdicts (Phase 4) ──────────────────────────────────────────
+
+
+@router.get("/{opportunity_id}/verdict", response_model=ScoringVerdictResponse)
+def get_opportunity_verdict(opportunity_id: int, db: Session = Depends(get_db)):
+    """Get the latest scoring verdict for an opportunity."""
+    opp = opportunity_repo.get_opportunity(db, opportunity_id)
+    if opp is None:
+        raise HTTPException(status_code=404, detail="Opportunity not found.")
+    verdict = scoring_repo.get_verdict_by_opportunity(db, opportunity_id)
+    if verdict is None:
+        raise HTTPException(status_code=404, detail="No verdict found for this opportunity.")
+    return verdict
+
+
+@router.post("/{opportunity_id}/evaluate", response_model=ScoringVerdictResponse)
+def evaluate_opportunity_endpoint(opportunity_id: int, db: Session = Depends(get_db)):
+    """Trigger on-demand evaluation of an opportunity through the funnel."""
+    opp = opportunity_repo.get_opportunity(db, opportunity_id)
+    if opp is None:
+        raise HTTPException(status_code=404, detail="Opportunity not found.")
+    from core.funnel.runner import evaluate_opportunity
+
+    verdict = evaluate_opportunity(db, opp, actor="api")
+    db.commit()
+    db.refresh(verdict)
+    return verdict
+

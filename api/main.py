@@ -36,11 +36,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Job Application Agent — Career Intelligence Core",
     description=(
-        "Phases 1–3 API: profile/resume management, opportunity tracking "
-        "with status machine, and automated discovery from Greenhouse, "
-        "Lever, RSS feeds, and Gmail job alerts."
+        "Phases 1–4 API: profile/resume management, opportunity tracking "
+        "with status machine, automated discovery (Greenhouse, Lever, RSS, Gmail), "
+        "and multi-stage AI/LLM evaluation funnel (eligibility filter + relevance scoring)."
     ),
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 

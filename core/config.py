@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # ── Scheduler ─────────────────────────────────────────────────────
     SCHEDULER_ENABLED: bool = True
 
+    # ── Funnel (Phase 4) ──────────────────────────────────────────────
+    FUNNEL_EVALUATOR_ENABLED: bool = False
+    FUNNEL_EVALUATOR_INTERVAL: int = 300    # 5 minutes
+    FUNNEL_SCORE_THRESHOLD: float = 0.0
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

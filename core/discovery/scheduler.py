@@ -44,6 +44,28 @@ def _run_source_job(source_factory, source_name: str):
         }
 
 
+def _run_funnel_job() -> None:
+    """Run funnel evaluation on newly discovered opportunities."""
+    try:
+        from core.database import get_session
+        from core.funnel.runner import run_funnel_batch
+
+        with get_session() as session:
+            results = run_funnel_batch(session, limit=50)
+            session.commit()
+            _last_results["funnel"] = {
+                "last_run": datetime.now(timezone.utc).isoformat(),
+                "processed": len(results),
+                "status": "ok",
+            }
+    except Exception:
+        logger.exception("Scheduler job [funnel] failed")
+        _last_results["funnel"] = {
+            "last_run": datetime.now(timezone.utc).isoformat(),
+            "status": "error",
+        }
+
+
 def start_scheduler() -> BackgroundScheduler:
     """Create, configure, and start the discovery scheduler.
 
@@ -127,6 +149,19 @@ def start_scheduler() -> BackgroundScheduler:
             "Scheduled Gmail alert discovery (every %ds)",
             settings.GMAIL_POLL_INTERVAL,
         )
+
+    # ── Funnel evaluation (Phase 4) ───────────────────────────────────
+    if getattr(settings, "FUNNEL_EVALUATOR_ENABLED", False) is True:
+        raw_interval = getattr(settings, "FUNNEL_EVALUATOR_INTERVAL", 300)
+        interval = raw_interval if isinstance(raw_interval, (int, float)) else 300
+        _scheduler.add_job(
+            _run_funnel_job,
+            "interval",
+            seconds=interval,
+            id="funnel_evaluator",
+            name="Funnel Evaluation",
+        )
+        logger.info("Scheduled Funnel evaluation (every %ds)", interval)
 
     _scheduler.start()
     logger.info("Discovery scheduler started")

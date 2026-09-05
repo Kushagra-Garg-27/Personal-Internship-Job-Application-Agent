@@ -93,6 +93,11 @@ class Opportunity(TimestampMixin, Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    scoring_verdicts: Mapped[list["ScoringVerdict"]] = relationship(  # noqa: F821
+        back_populates="opportunity",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
 
     # ── ORM-level validation ──────────────────────────────────────────
     @validates("status")

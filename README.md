@@ -1,21 +1,22 @@
 # Job Application Agent — Career Intelligence Core
 
-The **Career Intelligence Core** — a Python/FastAPI backend for managing user profiles, versioned resumes, opportunity tracking with a status machine, and automated discovery from Greenhouse, Lever, RSS feeds, and Gmail job alerts. Phases 1–3 of a larger Job/Internship Application Agent. No AI/LLM, no browser automation, no frontend yet.
+The **Career Intelligence Core** — a Python/FastAPI backend for managing user profiles, versioned resumes, opportunity tracking with a status machine, automated discovery from Greenhouse, Lever, RSS feeds, and Gmail job alerts, and a multi-stage evaluation funnel (deterministic eligibility filter + local embedding relevance scoring). Phases 1–4 of a larger Job/Internship Application Agent.
 
 ## What's Included
 
 | Layer | Description |
 |---|---|
-| **SQLAlchemy Models** | `profiles` + children, `resumes`, `opportunities`, `status_history`, `applications` (8 tables total) |
-| **Alembic Migrations** | Two migrations (0001 + 0002) in a chain; ready for future schema growth |
-| **Repository Layer** | `profile_repo`, `resume_repo`, `opportunity_repo`, `status_history_repo`, `application_repo` |
-| **Service Layer** | Profile/resume services + opportunity transition engine with allowed-transition map |
+| **SQLAlchemy Models** | `profiles` + children, `resumes`, `opportunities`, `status_history`, `applications`, `scoring_verdicts` (9 tables total) |
+| **Alembic Migrations** | Three migrations (0001 + 0002 + 0003) in a chain; ready for future schema growth |
+| **Repository Layer** | `profile_repo`, `resume_repo`, `opportunity_repo`, `status_history_repo`, `application_repo`, `scoring_repo` |
+| **Service Layer** | Profile/resume services + opportunity transition engine + funnel orchestrator |
 | **Resume Parser** | Deterministic text extraction from PDF/DOCX via `pypdf`/`python-docx` with fail-closed logic |
 | **Status Machine** | 14-status lifecycle with enforced transition map, audit trail, and idempotency primitives |
 | **Discovery Adapters** | Greenhouse, Lever (stable), RSS feeds (stable), Gmail job alerts (discovery_only) |
-| **Scheduler** | APScheduler with independent per-source jobs, configurable intervals |
-| **FastAPI API** | CRUD endpoints + discovery status + status transitions + applications |
-| **Test Suite** | 190 pytest tests — repos, parser, status transitions, adapters, pipeline, scheduler, API |
+| **Multi-Stage Funnel** | Pluggable pipeline: deterministic eligibility filtering -> local `all-MiniLM-L6-v2` relevance scoring |
+| **Scheduler** | APScheduler with independent per-source discovery jobs and periodic funnel batch evaluations |
+| **FastAPI API** | CRUD endpoints + discovery status + status transitions + applications + scoring verdicts |
+| **Test Suite** | 238 pytest tests — repos, parser, status transitions, adapters, pipeline, scheduler, eligibility, relevance, funnel, API |
 
 ## Quick Start
 
@@ -223,4 +224,54 @@ DiscoverySource (ABC)
 ```
 
 Each source runs independently via APScheduler — one failing doesn't block the others.
+
+## Phase 4 — Multi-Stage AI/LLM Funnel (Stages 1 & 3)
+
+Phase 4 introduces the first two stages of the five-stage evaluation funnel described in §5.2. It enforces strict short-circuit execution: if an earlier stage rejects an opportunity, later stages (and computationally expensive embedding or LLM models) are **never executed**.
+
+### The 5-Stage Funnel
+
+```
+Stage 1: Eligibility Filter (deterministic, no AI) ────► [Phase 4 — Built]
+         │ (Pass)
+         ▼
+Stage 2: Scam/Risk Filter (deterministic) ─────────────► [Phase 5 — Slot reserved]
+         │ (Pass)
+         ▼
+Stage 3: Relevance Scoring (local embeddings) ─────────► [Phase 4 — Built]
+         │ (Score >= threshold)
+         ▼
+Stage 4: LLM Reasoning (Gemini free tier) ─────────────► [Later Phase — Ambiguous cases]
+         │
+         ▼
+Stage 5: Human Review ─────────────────────────────────► [Phase 6 — Dashboard]
+```
+
+### Stage 1: Deterministic Eligibility Filter (`core/funnel/eligibility.py`)
+
+Checks hard constraints without AI or API calls:
+- **Application Deadline**: Verifies `opportunity.deadline_at` has not passed.
+- **Salary Floor**: Ensures `opportunity.salary_max >= profile.salary_floor` (benefits given when unspecified).
+- **Location & Remote Matching**: Enforces remote requirement if `remote_preference == "remote"` and matches preferred cities/tokens for on-site roles.
+- **Degree Requirements**: Scans descriptions for explicit requirements (e.g. PhD, MBA, Master's, CS branch) and validates candidate holds matching credentials.
+
+If eligibility fails, the opportunity transitions `discovered -> ineligible`, storing the specific rule and reason in `scoring_verdicts`.
+
+### Stage 3: Local Semantic Relevance Scoring (`core/funnel/relevance.py`)
+
+- **Model**: `all-MiniLM-L6-v2` via `sentence-transformers` (runs CPU-only, cached locally).
+- **Zero API/cloud dependencies**: Runs completely offline.
+- **Explainability**:
+  - Computes candidate-to-job cosine similarity score (`0.0` to `1.0`).
+  - Generates top matching candidate skills with similarity breakdown.
+  - Identifies top matching description sentences.
+- **State Transition**: Opportunities passing eligibility transition `discovered -> recommended`.
+
+### Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/opportunities/{id}/verdict` | Fetch latest scoring verdict and explanation |
+| `POST` | `/opportunities/{id}/evaluate` | Run evaluation funnel on an opportunity on demand |
+
 
