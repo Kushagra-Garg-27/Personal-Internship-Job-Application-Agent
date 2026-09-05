@@ -8,6 +8,10 @@ from sqlalchemy.orm import Session
 from api.deps import get_db
 from core.repositories import opportunity_repo, scoring_repo, status_history_repo
 from core.schemas.opportunity import (
+    DashboardFeedResponse,
+    DashboardOpportunityItem,
+    DismissRequest,
+    FinalApprovalRequest,
     OpportunityCreate,
     OpportunityResponse,
     OpportunityUpdate,
@@ -17,7 +21,7 @@ from core.schemas.opportunity import (
     StatusTransitionRequest,
 )
 from core.schemas.scoring import ScoringVerdictResponse
-from core.services import opportunity_service, scam_review_service
+from core.services import approval_service, opportunity_service, scam_review_service
 from core.status import InvalidTransitionError
 
 router = APIRouter(prefix="/opportunities", tags=["opportunities"])
@@ -55,6 +59,24 @@ def list_opportunities(
         db, status=status_filter, tier=tier, company=company, source=source,
         limit=limit, offset=offset,
     )
+
+
+# ── Phase 6 Consolidated Dashboard Feed ──────────────────────────────────
+
+
+@router.get("/dashboard-feed", response_model=DashboardFeedResponse)
+def get_dashboard_feed_endpoint(
+    status_filter: str | None = Query(None, alias="status"),
+    tier: str | None = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: Session = Depends(get_db),
+):
+    """Retrieve consolidated opportunity items for frontend dashboard views."""
+    items, total = approval_service.get_dashboard_feed(
+        db, status_filter=status_filter, tier=tier, limit=limit, offset=offset
+    )
+    return DashboardFeedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 # ── Scam review endpoints (Phase 5) ──────────────────────────────────────
@@ -108,6 +130,58 @@ def reject_scam_review(
     """
     try:
         opp = scam_review_service.reject_pending_opportunity(
+            db, opportunity_id, reason=body.reason, actor=body.actor
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    db.commit()
+    db.refresh(opp)
+    return opp
+
+
+# ── Phase 6 Final Approval & Dismissal Endpoints ─────────────────────────
+
+
+@router.post("/{opportunity_id}/approve", response_model=OpportunityResponse)
+def approve_opportunity_endpoint(
+    opportunity_id: int,
+    body: FinalApprovalRequest = FinalApprovalRequest(),
+    db: Session = Depends(get_db),
+):
+    """Final human approval to prepare an opportunity for application.
+
+    Transitions status to READY_TO_APPLY and records the selected resume version.
+    """
+    try:
+        opp = approval_service.approve_opportunity(
+            db, opportunity_id, resume_id=body.resume_id, actor=body.actor
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    except InvalidTransitionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    db.commit()
+    db.refresh(opp)
+    return opp
+
+
+@router.post("/{opportunity_id}/dismiss", response_model=OpportunityResponse)
+def dismiss_opportunity_endpoint(
+    opportunity_id: int,
+    body: DismissRequest = DismissRequest(),
+    db: Session = Depends(get_db),
+):
+    """Human dismissal of a recommended opportunity into terminal DISMISSED status."""
+    try:
+        opp = approval_service.dismiss_opportunity(
             db, opportunity_id, reason=body.reason, actor=body.actor
         )
     except ValueError as exc:

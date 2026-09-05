@@ -8,8 +8,9 @@ Run with::
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
-from api.routers import applications, opportunities, profiles, resumes
+from api.routers import applications, messages, notifications, opportunities, profiles, resumes
 from core.config import settings
 
 
@@ -36,12 +37,27 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Job Application Agent — Career Intelligence Core",
     description=(
-        "Phases 1–4 API: profile/resume management, opportunity tracking "
+        "Phases 1–8 API: profile/resume management, opportunity tracking "
         "with status machine, automated discovery (Greenhouse, Lever, RSS, Gmail), "
-        "and multi-stage AI/LLM evaluation funnel (eligibility filter + relevance scoring)."
+        "multi-stage AI/LLM evaluation funnel, human approval dashboard, "
+        "recruiter message classification & linking, and Telegram/WhatsApp notifications."
     ),
-    version="0.4.0",
+    version="0.8.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "*",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Phase 1
@@ -51,6 +67,13 @@ app.include_router(resumes.router)
 # Phase 2
 app.include_router(opportunities.router)
 app.include_router(applications.router)
+
+# Phase 7
+app.include_router(messages.router)
+app.include_router(messages.health_router)
+
+# Phase 8
+app.include_router(notifications.router)
 
 
 @app.get("/health", tags=["system"])

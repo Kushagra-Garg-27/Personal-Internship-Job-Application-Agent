@@ -1,5 +1,7 @@
 """SQLAlchemy engine, session factory, and WAL-mode setup for SQLite."""
 
+from contextlib import contextmanager
+
 from sqlalchemy import event, create_engine
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -34,3 +36,21 @@ def get_db() -> Session:  # type: ignore[misc]
         yield db  # type: ignore[misc]
     finally:
         db.close()
+
+
+@contextmanager
+def get_session() -> Session:  # type: ignore[misc]
+    """Context manager for non-FastAPI code (scheduler, background jobs).
+
+    Usage::
+
+        with get_session() as session:
+            session.query(...)
+            session.commit()
+    """
+    session = SessionLocal()
+    try:
+        yield session  # type: ignore[misc]
+    finally:
+        session.close()
+

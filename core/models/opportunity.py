@@ -75,11 +75,20 @@ class Opportunity(TimestampMixin, Base):
         Integer, ForeignKey("profiles.id", ondelete="SET NULL"), nullable=True
     )
 
+    # ── Target Resume link (Phase 6) ──────────────────────────────────
+    selected_resume_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("resumes.id", ondelete="SET NULL"), nullable=True
+    )
+
     # ── Extensible metadata ───────────────────────────────────────────
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # ── Relationships ─────────────────────────────────────────────────
     profile: Mapped["Profile"] = relationship(  # noqa: F821
+        lazy="selectin",
+    )
+    selected_resume: Mapped["Resume | None"] = relationship(  # noqa: F821
+        foreign_keys=[selected_resume_id],
         lazy="selectin",
     )
     status_history: Mapped[list[StatusHistory]] = relationship(

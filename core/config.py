@@ -123,6 +123,49 @@ class Settings(BaseSettings):
 
     WHOIS_MIN_DOMAIN_AGE_DAYS: int = 30
 
+    # ── Response Poller (Phase 7) ─────────────────────────────────────
+    RESPONSE_POLLER_ENABLED: bool = False
+    RESPONSE_POLL_INTERVAL: int = 120       # 2 minutes
+    RESPONSE_POLLER_BODY_PREVIEW_LENGTH: int = 500
+
+    # ── Notifications (Phase 8) ───────────────────────────────────────
+    # Telegram Bot API (required default provider)
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
+    TELEGRAM_TIMEOUT_SECONDS: int = 10
+    TELEGRAM_MAX_RETRIES: int = 3
+
+    # WhatsApp Cloud API (optional mirror provider)
+    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_PHONE_NUMBER_ID: str | None = None
+    WHATSAPP_RECIPIENT_PHONE: str | None = None
+    WHATSAPP_ACCESS_TOKEN: str | None = None
+    WHATSAPP_API_VERSION: str = "v18.0"
+
+    # Event-type filtering defaults (permissive by default)
+    NOTIFICATION_DEFAULT_EVENTS: dict[str, bool] = {
+        "interview_invite": True,
+        "offer": True,
+        "screening_question": True,
+        "follow_up": True,
+        "rejection": True,
+        "generic": False,
+        "unclassified": True,
+        "integration_unhealthy": True,
+        "quota_exhausted": True,
+        "channel_degraded": True,
+        "test_event": True,
+        "application_ready_for_review": True,
+        "application_manual_required": True,
+    }
+
+    # Phase 9: Browser Worker & Watcher settings
+    WORKER_WATCHER_ENABLED: bool = True
+    WORKER_WATCHER_INTERVAL: int = 30
+    WORKER_STORAGE_KEY: str | None = None
+    WORKER_HEADLESS: bool = False
+    WORKER_POLL_INTERVAL: int = 20
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

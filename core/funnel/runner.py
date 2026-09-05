@@ -239,6 +239,21 @@ def evaluate_opportunity(
                     quota_deferred_at=completed_at,
                     funnel_completed_at=completed_at,
                 )
+
+                # Wire Phase 8: alert candidate if item deferred due to Gemini quota exhaustion
+                if scam_reason_dict.get("is_quota_exhausted"):
+                    try:
+                        from core.notifications import build_quota_event, notification_service
+                        quota_event = build_quota_event(
+                            opportunity_id=opportunity.id,
+                            company=opportunity.company,
+                            title=opportunity.title,
+                            rule=scam_reason_dict.get("rule"),
+                        )
+                        notification_service.dispatch(quota_event, session=session)
+                    except Exception as notif_err:
+                        logger.warning("Failed to dispatch quota exhaustion alert: %s", notif_err)
+
                 # Fail-closed: stays in DISCOVERED without transitioning to recommended/rejected
                 return verdict
 

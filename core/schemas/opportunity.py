@@ -66,6 +66,7 @@ class OpportunityResponse(BaseModel):
     deadline_at: datetime | None = None
     discovered_at: datetime
     profile_id: int | None = None
+    selected_resume_id: int | None = None
     metadata_json: dict[str, Any] | None = None
     created_at: datetime
     updated_at: datetime
@@ -109,6 +110,88 @@ class ScamReviewRejectRequest(BaseModel):
 
     reason: str = "Rejected during human review"
     actor: str = "human_reviewer"
+
+
+# ── Phase 6 Dashboard & Approval schemas ──────────────────────────────────
+
+
+class FinalApprovalRequest(BaseModel):
+    """Input for final human approval to apply for an opportunity."""
+
+    resume_id: int | None = None
+    actor: str = "human_user"
+
+
+class DismissRequest(BaseModel):
+    """Input for dismissing a recommended opportunity."""
+
+    reason: str = "Declined by user during review"
+    actor: str = "human_user"
+
+
+class ResumeOption(BaseModel):
+    """Compact representation of candidate resume version for selection."""
+
+    id: int
+    version: int
+    original_filename: str
+    is_active: bool
+    uploaded_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DashboardOpportunityItem(BaseModel):
+    """Consolidated opportunity representation for the frontend dashboard."""
+
+    id: int
+    dedup_hash: str
+    status: str
+    reliability_tier: str
+    source: str | None = None
+    title: str
+    company: str
+    description: str | None = None
+    url: str | None = None
+    location: str | None = None
+    salary_min: int | None = None
+    salary_max: int | None = None
+    posted_at: datetime | None = None
+    deadline_at: datetime | None = None
+    discovered_at: datetime
+    profile_id: int | None = None
+    selected_resume_id: int | None = None
+
+    # Relevance & scoring
+    relevance_score: float | None = None
+    relevance_explanation: dict[str, Any] | None = None
+    model_name: str | None = None
+
+    # Eligibility
+    eligibility_passed: bool | None = None
+    eligibility_reason: dict[str, Any] | None = None
+
+    # Scam & risk
+    scam_verdict: str | None = None
+    scam_reason: dict[str, Any] | None = None
+    llm_verdict: str | None = None
+    llm_reasoning: str | None = None
+    quota_deferred_at: datetime | None = None
+    funnel_completed_at: datetime | None = None
+
+    # Resumes
+    available_resumes: list[ResumeOption] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DashboardFeedResponse(BaseModel):
+    """Dashboard feed response with items and counts."""
+
+    items: list[DashboardOpportunityItem]
+    total: int
+    limit: int
+    offset: int
 
 
 # ── Application schemas ──────────────────────────────────────────────────

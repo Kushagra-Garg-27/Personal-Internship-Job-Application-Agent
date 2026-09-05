@@ -1,0 +1,27 @@
+{
+  "id": "abc-123-def",
+  "text": "Junior Python Developer",
+  "categories": {
+    "commitment": "Full Time",
+    "location": "Bangalore, India",
+    "team": "Engineering"
+  },
+  "content": {
+    "description": "Join our platform team building microservices in Python.",
+    "lists": []
+  },
+  "customQuestions": [
+    {
+      "id": "cq_1",
+      "text": "Why do you want to work at Spotify?",
+      "required": true,
+      "type": "textarea"
+    },
+    {
+      "id": "cq_2",
+      "text": "What is your notice period / earliest start date?",
+      "required": true,
+      "type": "text"
+    }
+  ]
+}

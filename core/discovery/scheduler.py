@@ -66,6 +66,55 @@ def _run_funnel_job() -> None:
         }
 
 
+def _run_response_poller_job() -> None:
+    """Run a single recruiter response poll cycle (Phase 7).
+
+    Isolated from discovery jobs — token expiration here does not affect
+    the discovery scheduler.
+    """
+    try:
+        from core.database import get_session
+        from core.messaging.poller import run_response_poll
+
+        with get_session() as session:
+            stats = run_response_poll(session)
+            _last_results["response_poller"] = {
+                "last_run": datetime.now(timezone.utc).isoformat(),
+                "total_fetched": stats.get("total_fetched", 0),
+                "classified": stats.get("classified", 0),
+                "linked": stats.get("linked", 0),
+                "status": "ok",
+            }
+    except Exception:
+        logger.exception("Scheduler job [response_poller] failed")
+        _last_results["response_poller"] = {
+            "last_run": datetime.now(timezone.utc).isoformat(),
+            "status": "error",
+        }
+
+
+def _run_worker_watcher_job() -> None:
+    """Run Core-side notification watcher for Worker events (Phase 9)."""
+    try:
+        from core.database import get_session
+        from core.notifications.worker_watcher import poll_worker_events
+
+        with get_session() as session:
+            stats = poll_worker_events(session)
+            _last_results["worker_watcher"] = {
+                "last_run": datetime.now(timezone.utc).isoformat(),
+                "checked": stats.get("checked", 0),
+                "notified": stats.get("notified", 0),
+                "status": "ok",
+            }
+    except Exception:
+        logger.exception("Scheduler job [worker_watcher] failed")
+        _last_results["worker_watcher"] = {
+            "last_run": datetime.now(timezone.utc).isoformat(),
+            "status": "error",
+        }
+
+
 def start_scheduler() -> BackgroundScheduler:
     """Create, configure, and start the discovery scheduler.
 
@@ -162,6 +211,32 @@ def start_scheduler() -> BackgroundScheduler:
             name="Funnel Evaluation",
         )
         logger.info("Scheduled Funnel evaluation (every %ds)", interval)
+
+    # ── Response poller (Phase 7) ─────────────────────────────────────
+    if getattr(settings, "RESPONSE_POLLER_ENABLED", False) is True:
+        raw_interval = getattr(settings, "RESPONSE_POLL_INTERVAL", 120)
+        interval = raw_interval if isinstance(raw_interval, (int, float)) else 120
+        _scheduler.add_job(
+            _run_response_poller_job,
+            "interval",
+            seconds=interval,
+            id="response_poller",
+            name="Response Poller",
+        )
+        logger.info("Scheduled Response poller (every %ds)", interval)
+
+    # ── Worker notification watcher (Phase 9) ─────────────────────────
+    if getattr(settings, "WORKER_WATCHER_ENABLED", True) is True:
+        raw_interval = getattr(settings, "WORKER_WATCHER_INTERVAL", 30)
+        interval = raw_interval if isinstance(raw_interval, (int, float)) else 30
+        _scheduler.add_job(
+            _run_worker_watcher_job,
+            "interval",
+            seconds=interval,
+            id="worker_watcher",
+            name="Worker Notification Watcher",
+        )
+        logger.info("Scheduled Worker notification watcher (every %ds)", interval)
 
     _scheduler.start()
     logger.info("Discovery scheduler started")

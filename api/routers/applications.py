@@ -85,3 +85,25 @@ def update_application(
     db.commit()
     db.refresh(app)
     return app
+
+
+@router.post(
+    "/applications/{application_id}/confirm-submit",
+    response_model=dict,
+)
+def confirm_submit_application(
+    application_id: int,
+    db: Session = Depends(get_db),
+):
+    """Human confirmation action to execute pending draft submission (Phase 9).
+    Submits the reviewed draft payload to the platform API (Greenhouse/Lever).
+    """
+    from worker.engine.filler import ApplicationFiller
+
+    filler = ApplicationFiller()
+    try:
+        result = filler.confirm_and_submit(db, application_id)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+

@@ -1,0 +1,54 @@
+{
+  "id": 12345,
+  "title": "Software Engineer Intern",
+  "board": "acme",
+  "location": {
+    "name": "Remote, US"
+  },
+  "questions": [
+    {
+      "id": 101,
+      "label": "First Name",
+      "required": true,
+      "fields": [{"name": "first_name", "type": "input_text"}]
+    },
+    {
+      "id": 102,
+      "label": "Last Name",
+      "required": true,
+      "fields": [{"name": "last_name", "type": "input_text"}]
+    },
+    {
+      "id": 103,
+      "label": "Email",
+      "required": true,
+      "fields": [{"name": "email", "type": "input_text"}]
+    },
+    {
+      "id": 104,
+      "label": "Phone",
+      "required": true,
+      "fields": [{"name": "phone", "type": "input_text"}]
+    },
+    {
+      "id": 105,
+      "label": "Resume/CV",
+      "required": true,
+      "fields": [{"name": "resume", "type": "input_file"}]
+    },
+    {
+      "id": 201,
+      "label": "Why do you want to join Acme Corp?",
+      "required": true,
+      "name": "question_why_acme",
+      "fields": [{"name": "question_why_acme", "type": "textarea"}]
+    },
+    {
+      "id": 202,
+      "label": "Describe a challenging project you built.",
+      "required": false,
+      "name": "question_project",
+      "fields": [{"name": "question_project", "type": "textarea"}]
+    }
+  ]
+}

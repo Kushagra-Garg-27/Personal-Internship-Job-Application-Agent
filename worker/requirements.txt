@@ -1,0 +1,5 @@
+# Browser Automation Worker Requirements (Phase 9)
+# Isolated exclusively to the worker process — never imported by Core.
+playwright>=1.40.0
+cryptography>=42.0.0
+APScheduler>=3.10.0,<4.0.0

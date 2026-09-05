@@ -46,8 +46,8 @@ class Profile(TimestampMixin, Base):
     links: Mapped[list[ProfileLink]] = relationship(
         back_populates="profile", cascade="all, delete-orphan", lazy="selectin"
     )
-    resumes: Mapped[list] = relationship(
-        "Resume", back_populates="profile", cascade="all, delete-orphan", lazy="selectin"
+    resumes: Mapped[list["Resume"]] = relationship(
+        "Resume", back_populates="profile", cascade="all, delete-orphan", lazy="selectin", uselist=True
     )
 
     def __repr__(self) -> str:

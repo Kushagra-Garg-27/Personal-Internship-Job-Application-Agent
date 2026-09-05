@@ -9,6 +9,8 @@ from core.models.resume import Resume
 from core.models.opportunity import Application, Opportunity, StatusHistory
 from core.models.scam_signature import ScamContentSignature
 from core.models.scoring import ScoringVerdict
+from core.models.message import IntegrationHealthEvent, RecruiterMessage
+from core.models.notification import NotificationLog, NotificationSetting
 
 __all__ = [
     "Base",
@@ -27,4 +29,10 @@ __all__ = [
     "ScoringVerdict",
     # Phase 5
     "ScamContentSignature",
+    # Phase 7
+    "RecruiterMessage",
+    "IntegrationHealthEvent",
+    # Phase 8
+    "NotificationLog",
+    "NotificationSetting",
 ]

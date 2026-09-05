@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Internshala Application Form</title>
+</head>
+<body>
+  <div class="internship_details">
+    <h1 class="profile_on_detail_page">Python Backend Intern</h1>
+    <div class="company_name">Alpha Tech Solutions</div>
+  </div>
+
+  <div id="application_modal" class="application_form_container">
+    <h2>Apply for Python Backend Intern</h2>
+    <form id="application_form" method="POST" action="/submit_application">
+      <div class="form_group">
+        <label for="cover_letter">Why should you be hired for this role?</label>
+        <textarea id="cover_letter" name="cover_letter" class="cover_letter form-control" rows="6"></textarea>
+      </div>
+
+      <div class="form_group">
+        <label for="other_experiences">Are you available to join immediately?</label>
+        <input type="text" id="other_experiences" name="availability" class="form-control" />
+      </div>
+
+      <div class="form_group">
+        <label for="resume_upload">Upload Custom Resume</label>
+        <input type="file" id="resume_upload" name="resume_file" class="form-control" accept=".pdf" />
+      </div>
+
+      <div class="submit_container">
+        <button type="button" id="submit_button" class="btn btn-primary">Submit Application</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

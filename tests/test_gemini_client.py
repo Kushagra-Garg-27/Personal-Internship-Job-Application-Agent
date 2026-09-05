@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
@@ -51,8 +51,8 @@ class TestGeminiQuotaTracker:
         tracker.record_call()
         assert tracker.calls_used == 2
 
-        # Simulate date rolling over to yesterday
-        tracker._current_date = date.today() - timedelta(days=1)
+        # Simulate date rolling over to yesterday (using UTC to match tracker)
+        tracker._current_date = datetime.now(timezone.utc).date() - timedelta(days=1)
         assert tracker.can_make_call() is True
         assert tracker.calls_used == 0
         assert tracker.calls_remaining == 5
