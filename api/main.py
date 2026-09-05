@@ -5,17 +5,43 @@ Run with::
     uvicorn api.main:app --reload
 """
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from api.routers import applications, opportunities, profiles, resumes
+from core.config import settings
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Start/stop the discovery scheduler with the app lifecycle."""
+    if settings.SCHEDULER_ENABLED:
+        from core.discovery.scheduler import start_scheduler, stop_scheduler
+
+        try:
+            start_scheduler()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Discovery scheduler failed to start (likely no sources configured)"
+            )
+    yield
+    if settings.SCHEDULER_ENABLED:
+        from core.discovery.scheduler import stop_scheduler
+
+        stop_scheduler()
+
 
 app = FastAPI(
     title="Job Application Agent — Career Intelligence Core",
     description=(
-        "Phase 1 & 2 API: profile/resume management and opportunity tracking "
-        "with a status machine, audit trail, and application attempt records."
+        "Phases 1–3 API: profile/resume management, opportunity tracking "
+        "with status machine, and automated discovery from Greenhouse, "
+        "Lever, RSS feeds, and Gmail job alerts."
     ),
-    version="0.2.0",
+    version="0.3.0",
+    lifespan=lifespan,
 )
 
 # Phase 1
@@ -31,3 +57,11 @@ app.include_router(applications.router)
 def health_check():
     """Simple liveness probe."""
     return {"status": "ok"}
+
+
+@app.get("/discovery/status", tags=["discovery"])
+def discovery_status():
+    """Current scheduler status and last-run info for each discovery source."""
+    from core.discovery.scheduler import get_scheduler_status
+
+    return get_scheduler_status()

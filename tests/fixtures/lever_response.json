@@ -1,0 +1,50 @@
+[
+  {
+    "id": "abc-def-123",
+    "text": "Frontend Engineer",
+    "hostedUrl": "https://jobs.lever.co/democorp/abc-def-123",
+    "applyUrl": "https://jobs.lever.co/democorp/abc-def-123/apply",
+    "categories": {
+      "commitment": "Full-time",
+      "location": "Seattle, WA",
+      "team": "Product Engineering",
+      "department": "Engineering"
+    },
+    "description": "We need a frontend engineer who loves React.",
+    "descriptionPlain": "We need a frontend engineer who loves React.",
+    "createdAt": 1723766400000,
+    "workplaceType": "onSite",
+    "salaryRange": {
+      "min": 80000,
+      "max": 120000,
+      "currency": "USD",
+      "interval": "per-year"
+    }
+  },
+  {
+    "id": "ghi-jkl-456",
+    "text": "Product Design Intern",
+    "hostedUrl": "https://jobs.lever.co/democorp/ghi-jkl-456",
+    "applyUrl": "https://jobs.lever.co/democorp/ghi-jkl-456/apply",
+    "categories": {
+      "commitment": "Intern",
+      "location": "Remote",
+      "team": "Design"
+    },
+    "description": "Summer design internship opportunity.",
+    "descriptionPlain": "Summer design internship opportunity.",
+    "createdAt": 1724371200000,
+    "workplaceType": "remote"
+  },
+  {
+    "id": "mno-pqr-789",
+    "text": "ML Engineer",
+    "hostedUrl": "https://jobs.lever.co/democorp/mno-pqr-789",
+    "categories": {
+      "commitment": "Full-time",
+      "location": "San Francisco, CA"
+    },
+    "descriptionPlain": "Join our ML team to build cutting-edge models.",
+    "createdAt": 1724976000000
+  }
+]

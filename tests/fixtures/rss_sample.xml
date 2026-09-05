@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>AcmeCorp Careers</title>
+    <link>https://acmecorp.com/careers</link>
+    <description>Latest job openings at AcmeCorp</description>
+    <item>
+      <title>Systems Engineer</title>
+      <link>https://acmecorp.com/careers/systems-engineer</link>
+      <description>We are hiring a systems engineer to manage our cloud infrastructure.</description>
+      <pubDate>Mon, 15 Aug 2026 12:00:00 GMT</pubDate>
+      <guid>https://acmecorp.com/careers/systems-engineer</guid>
+    </item>
+    <item>
+      <title>QA Intern</title>
+      <link>https://acmecorp.com/careers/qa-intern</link>
+      <description>Summer internship in quality assurance.</description>
+      <pubDate>Wed, 20 Aug 2026 09:00:00 GMT</pubDate>
+      <guid>https://acmecorp.com/careers/qa-intern</guid>
+      <author>hr@acmecorp.com</author>
+    </item>
+  </channel>
+</rss>

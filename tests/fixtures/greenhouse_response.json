@@ -1,0 +1,51 @@
+{
+  "jobs": [
+    {
+      "id": 4012345,
+      "internal_job_id": 5012345,
+      "title": "Software Engineer Intern",
+      "updated_at": "2026-08-15T10:30:00-04:00",
+      "requisition_id": "REQ-001",
+      "location": {
+        "name": "San Francisco, CA"
+      },
+      "absolute_url": "https://boards.greenhouse.io/testcorp/jobs/4012345",
+      "metadata": null,
+      "departments": [
+        {"id": 100, "name": "Engineering"}
+      ],
+      "content": "<p>We are looking for a talented intern to join our engineering team.</p><h3>Requirements</h3><ul><li>Currently pursuing a CS degree</li><li>Experience with Python or Java</li></ul>"
+    },
+    {
+      "id": 4012346,
+      "internal_job_id": 5012346,
+      "title": "Data Science Intern",
+      "updated_at": "2026-08-20T14:00:00-04:00",
+      "requisition_id": "REQ-002",
+      "location": {
+        "name": "New York, NY"
+      },
+      "absolute_url": "https://boards.greenhouse.io/testcorp/jobs/4012346",
+      "metadata": null,
+      "departments": [
+        {"id": 101, "name": "Data Science"}
+      ],
+      "content": "<p>Join our data science team for a summer internship.</p>"
+    },
+    {
+      "id": 4012347,
+      "internal_job_id": 5012347,
+      "title": "Backend Developer",
+      "updated_at": "2026-09-01T09:15:00-04:00",
+      "location": {
+        "name": "Remote"
+      },
+      "absolute_url": "https://boards.greenhouse.io/testcorp/jobs/4012347",
+      "departments": [],
+      "content": "<p>Full-time backend developer position.</p>"
+    }
+  ],
+  "meta": {
+    "total": 3
+  }
+}

@@ -1,6 +1,6 @@
 # Job Application Agent — Career Intelligence Core
 
-The **Career Intelligence Core** — a Python/FastAPI backend for managing user profiles, versioned resumes, and opportunity tracking with a status machine. Phases 1 & 2 of a larger Job/Internship Application Agent. No AI/LLM, no browser automation, no frontend yet.
+The **Career Intelligence Core** — a Python/FastAPI backend for managing user profiles, versioned resumes, opportunity tracking with a status machine, and automated discovery from Greenhouse, Lever, RSS feeds, and Gmail job alerts. Phases 1–3 of a larger Job/Internship Application Agent. No AI/LLM, no browser automation, no frontend yet.
 
 ## What's Included
 
@@ -12,8 +12,10 @@ The **Career Intelligence Core** — a Python/FastAPI backend for managing user 
 | **Service Layer** | Profile/resume services + opportunity transition engine with allowed-transition map |
 | **Resume Parser** | Deterministic text extraction from PDF/DOCX via `pypdf`/`python-docx` with fail-closed logic |
 | **Status Machine** | 14-status lifecycle with enforced transition map, audit trail, and idempotency primitives |
-| **FastAPI API** | CRUD endpoints for profiles, resumes, opportunities, status transitions, and applications |
-| **Test Suite** | 111 pytest tests — repos, parser, status transitions, API integration |
+| **Discovery Adapters** | Greenhouse, Lever (stable), RSS feeds (stable), Gmail job alerts (discovery_only) |
+| **Scheduler** | APScheduler with independent per-source jobs, configurable intervals |
+| **FastAPI API** | CRUD endpoints + discovery status + status transitions + applications |
+| **Test Suite** | 190 pytest tests — repos, parser, status transitions, adapters, pipeline, scheduler, API |
 
 ## Quick Start
 
@@ -158,4 +160,67 @@ discovered → recommended → ready_to_apply → applied → submitted → inte
 | `PATCH` | `/applications/{id}` | Update application status |
 | `GET` | `/health` | Liveness probe |
 
+## Phase 3 — Discovery Adapters
+
+### Configured Sources
+
+| Source | Tier | API | Polling Interval |
+|---|---|---|---|
+| **Greenhouse** | `stable` | `boards-api.greenhouse.io/v1/boards/{token}/jobs` | 6 hours |
+| **Lever** | `stable` | `api.lever.co/v0/postings/{slug}` | 6 hours |
+| **RSS/Atom** | `stable` | Any RSS/Atom feed URL | 2 hours |
+| **Gmail Alerts** | `discovery_only` | Gmail API v1 `history.list` | 5 minutes |
+
+### Adding Sources
+
+All sources are configured via environment variables or `.env`:
+
+```bash
+# Greenhouse boards (JSON array)
+GREENHOUSE_BOARDS='[{"token": "vaulttec", "company": "Vault-Tec"}, {"token": "airbnb", "company": "Airbnb"}]'
+
+# Lever companies (JSON array)
+LEVER_COMPANIES='[{"slug": "netflix", "company": "Netflix"}]'
+
+# RSS feeds (JSON array)
+RSS_FEEDS='[{"url": "https://company.com/careers/rss", "company": "Company"}]'
+
+# Gmail (requires OAuth2 setup — run: python -m core.discovery.gmail_client)
+GMAIL_CREDENTIALS_FILE=credentials.json
+```
+
+### Gmail OAuth2 Setup
+
+1. Create a Google Cloud project, enable the Gmail API
+2. Create OAuth2 Desktop App credentials → download `credentials.json`
+3. Set `GMAIL_CREDENTIALS_FILE=credentials.json` in `.env`
+4. Run `python -m core.discovery.gmail_client` (opens browser once for consent)
+
+### Discovery Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/discovery/status` | Scheduler status + last-run info per source |
+
+### Architecture
+
+```
+DiscoverySource (ABC)
+├── GreenhouseSource  [stable]     → httpx → Greenhouse API
+├── LeverSource       [stable]     → httpx → Lever API
+├── RSSFeedSource     [stable]     → feedparser → RSS/Atom feeds
+└── GmailAlertSource  [discovery_only] → Gmail API → rules-based parsing
+                          │
+                          ▼
+                    pipeline.py
+              (normalize + dedup + upsert)
+                          │
+                          ▼
+           opportunity_service.upsert_opportunity()
+                          │
+                          ▼
+              opportunities table (status=discovered)
+```
+
+Each source runs independently via APScheduler — one failing doesn't block the others.
 

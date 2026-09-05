@@ -18,6 +18,16 @@ from api.deps import get_db
 from core.config import settings
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _disable_scheduler():
+    """Prevent the discovery scheduler from starting during tests."""
+    original = settings.SCHEDULER_ENABLED
+    settings.SCHEDULER_ENABLED = False
+    yield
+    settings.SCHEDULER_ENABLED = original
+
+
+
 @pytest.fixture(scope="session")
 def engine():
     """Create an in-memory SQLite engine for the full test session."""

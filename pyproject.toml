@@ -1,6 +1,6 @@
 [project]
 name = "job-app-agent"
-version = "0.1.0"
+version = "0.3.0"
 description = "Personal Job/Internship Application Agent — Career Intelligence Core"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,12 +13,21 @@ dependencies = [
     "pypdf>=4.0",
     "python-docx>=1.1",
     "python-multipart>=0.0.9",
+    # Phase 3: discovery
+    "httpx>=0.27",
+    "feedparser>=6.0",
+    "APScheduler>=3.10,<4",
+    "google-api-python-client>=2.100",
+    "google-auth-oauthlib>=1.0",
+    "google-auth-httplib2>=0.2",
+    "beautifulsoup4>=4.12",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "httpx>=0.27",
+    "respx>=0.22",
 ]
 
 [build-system]
