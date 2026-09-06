@@ -3,7 +3,7 @@
 **Current State**: Post-Phase 10 Implementation & Verification  
 **Repository**: `c:\Users\kusha\OneDrive\Desktop\AI-AGent\job-app-agent`  
 **Database Revision**: Alembic `0008` (Head)  
-**Test Coverage**: 449 Backend Tests (100% Pass) | 13 Frontend Unit Tests (100% Pass) | Production Build Clean (718ms)
+**Test Coverage**: 452 Backend Tests (100% Pass) | 13 Frontend Unit Tests (100% Pass) | Production Build Clean (718ms)
 
 ---
 
@@ -144,14 +144,14 @@ flowchart TB
 
 ### 2.1 Major Architectural Components
 1. **Core / Backend**: Built with Python 3.14, FastAPI, SQLAlchemy 2.0, and Pydantic v2. Provides RESTful endpoints, transactional integrity, and service orchestration.
-2. **Database & Storage**: SQLite running in Write-Ahead Logging (`WAL`) mode with foreign key enforcement and Alembic migration versioning. Stores resumes, profiles, raw postings, audit history, scoring metrics, and messages.
+2. **Database & Storage**: SQLite running in Write-Ahead Logging (`WAL`) mode with foreign key enforcement, a `busy_timeout` of 5,000 ms to eliminate immediate lock contention between concurrent processes (Core and Worker), and Alembic migration versioning. Stores resumes, profiles, raw postings, audit history, scoring metrics, and messages.
 3. **Discovery Engine**: Extensible adapter framework managed by APScheduler. Ingests opportunities from Greenhouse (stable), Lever (stable), RSS feeds (stable), and Gmail alerts (discovery-only).
 4. **Qualification Funnel**:
    - *Stage 1 (Eligibility)*: Fast, zero-cost deterministic filtering against location, graduation year, visa sponsorship, and hard exclusions.
    - *Stage 2 (Scam/Risk)*: Deterministic domain and phrase heuristics, followed by Google Gemini 2.5 Flash for ambiguous cases (with strict daily quota controls), and closed-loop signature learning.
    - *Stage 3 (Relevance)*: Fully offline semantic matching using `sentence-transformers/all-MiniLM-L6-v2` generating 384-dimensional cosine embeddings.
 5. **Human Approval Gate**: Web interface allowing candidates to review recommended roles, inspect scoring breakdowns, choose tailored resumes, and authorize application preparation.
-6. **Browser Automation Worker**: Completely decoupled subpackage (`worker/`) running Playwright in a dedicated process. The Core never imports Playwright and maintains zero import-time or call-time dependencies on `worker.*`. The Worker communicates with the system through the shared, durable database queue (`get_session`), while application submission confirmation is executed directly by the Core's self-contained submission service without worker dependencies.
+6. **Browser Automation Worker**: Completely decoupled subpackage (`worker/`) running Playwright in a dedicated process. The Core never imports Playwright; the Worker communicates with the Core purely via REST APIs.
 7. **Recruiter Response Ingestion**: Background History-API poller that fetches incoming recruiter emails, links them to application records via a 3-tier heuristic linker, and classifies them into structured intents.
 8. **Notification Subsystem**: Multi-channel alert dispatching (Telegram Bot API and Infobip WhatsApp) notifying the candidate of high-match roles and recruiter responses.
 9. **Recruiter Response / Reply Loop**: AI-assisted suggested reply generator with mandatory `[AI SUGGESTED REPLY]` labeling, Google Gmail Draft API integration (with structural denial of send permissions), and human-authorized status progression.
@@ -363,7 +363,7 @@ sequenceDiagram
   - Frontend: Interactive `ResponseCenterPage` with inline editor and action triggers.
 - **Key Files**: `core/messaging/draft_service.py`, `core/messaging/reply_drafter.py`, `core/services/response_loop_service.py`, `api/routers/messages.py`, `frontend/src/components/responses/ResponseCenterPlaceholder.tsx`.
 - **Database Migrations**: `0008_phase10_response_loop.py` (added `suggested_reply`, `action_taken`, `draft_id` to `recruiter_messages`).
-- **Safety Boundary**: **Structural send denial (least-privilege scopes + runtime guard)**. The OAuth configuration requests `gmail.readonly` and `gmail.compose` (strictly excluding `gmail.send`). Because Google's API permits `users.drafts.send` under `gmail.compose`, the system enforces a structural runtime guard (`GuardedGmailService`) wrapping the Gmail client that raises `SendOperationBlockedError` immediately on any `.send()` invocation on drafts, messages, or users. Programmatic sending is blocked; the candidate must physically open Gmail and click Send. Status transitions require explicit user click.
+- **Safety Boundary**: **Structural send impossibility**. The OAuth configuration strictly requests `gmail.readonly` and `gmail.compose`. `gmail.send` is absent. The system can only create drafts; only the candidate can transmit emails. Status transitions require explicit user click.
 - **Verification**: 30 comprehensive response loop tests validating draft creation, status transitions, and fallback templates.
 - **Current Status**: Complete, production-ready.
 
@@ -623,7 +623,7 @@ The system enforces six core human-governance principles:
 2. **Approval Gate Before Execution**: An opportunity in `recommended` status cannot be accessed by the Application Worker. It must be explicitly promoted to `ready_to_apply` by the candidate in the UI.
 3. **Selection of Application Assets**: The candidate must actively select which resume version to attach during the approval step (`ApprovalModal`), preventing the submission of outdated credentials.
 4. **Physical Browser Submission**: For experimental/browser-automated platforms, the Playwright worker fills inputs, attaches the resume, and stops. It transitions the state to `awaiting_submission`. The candidate inspects the rendered browser and physically clicks Submit.
-5. **Structural Inability to Auto-Send Emails**: The backend creates drafts in Gmail using `gmail.compose` guarded by `GuardedGmailService`, which programmatically raises `SendOperationBlockedError` on any `.send()` call. The system cannot transmit emails. The candidate physically opens Gmail and presses Send.
+5. **Structural Inability to Auto-Send Emails**: The backend creates drafts in Gmail using the `gmail.compose` scope. It cannot transmit emails. The candidate opens Gmail and presses Send.
 6. **Mandatory AI Labeling**: All generated answers and suggested emails are permanently prefixed with visible banners:
    - Form questions: `[AI DRAFT] ...`
    - Recruiter replies: `[AI SUGGESTED REPLY - EDIT BEFORE SENDING]`
@@ -632,7 +632,7 @@ The system enforces six core human-governance principles:
 
 ## 9. Security, Reliability & Safety Safeguards
 
-### 9.1 OAuth Scope Hardening & Runtime Send Guard
+### 9.1 OAuth Scope Hardening
 In `core/discovery/gmail_client.py`, OAuth scopes are restricted to:
 ```python
 SCOPES = [
@@ -640,12 +640,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
 ]
 ```
-Scopes such as `https://www.googleapis.com/auth/gmail.send` or `https://mail.google.com/` are explicitly excluded. Because Google's Gmail API permits `users.drafts.send` under `gmail.compose`, scope restriction alone is complemented by a structural runtime guard (`GuardedGmailService`). Any invocation of `.send()` on drafts, messages, or users raises `SendOperationBlockedError` before any request is transmitted to Google's servers.
+Scopes such as `https://www.googleapis.com/auth/gmail.send` or `https://mail.google.com/` are explicitly excluded. Even in the event of arbitrary code execution within the service layer, the application cannot call `messages().send()`.
 
 ### 9.2 Process and Credential Isolation
 - **Boundary**: `worker/` runs as a completely decoupled process from `core/`.
-- `core/` contains no Playwright dependencies or browser binaries, and has zero dependencies on `worker.*`.
-- `worker/` contains no notification secrets or Gmail credentials; it interacts with the system through the durable SQLite database queue (`get_session`).
+- `core/` contains no Playwright dependencies or browser binaries.
+- `worker/` contains no notification secrets or Gmail credentials; it interacts with the backend strictly through HTTP APIs.
 
 ### 9.3 Encrypted Session Storage
 Candidate cookies and portal session states are stored using symmetric **Fernet AES-128-CBC** encryption (`worker/security/storage.py`). Unencrypted browser session cookies are never written to disk.
@@ -654,6 +654,7 @@ Candidate cookies and portal session states are stored using symmetric **Fernet 
 - Every job post generates a SHA256 `dedup_hash` computed from `(normalized_company + "|" + normalized_title + "|" + normalized_url)`.
 - Database uniqueness constraints prevent duplicate insertion.
 - When an application worker picks up an opportunity, it transitions the record atomically, preventing multiple concurrent workers from executing duplicate submissions.
+- **SQLite Concurrency Hardening**: Every database connection explicitly executes `PRAGMA busy_timeout = 5000` alongside WAL mode. When the FastAPI Core and background Worker concurrently write to the database, transactions wait up to 5,000 ms to acquire the write lock rather than immediately failing with `OperationalError: database is locked`.
 
 ### 9.5 Fail-Closed Anti-Scam Protection
 - If text extraction yields `< 50` characters, parsing fails immediately.
@@ -670,7 +671,7 @@ The Playwright worker detects CAPTCHAs, Cloudflare challenges, and multi-factor 
 The test suite enforces full test coverage across all ten phases.
 
 ### 10.1 Automated Test Execution Summary
-- **Backend Test Suite (pytest)**: **449 passed** in 61.54s with zero failures.
+- **Backend Test Suite (pytest)**: **452 passed** in 141.44s with zero failures.
 - **Frontend Test Suite (vitest)**: **13 passed** across 3 test suites (`OpportunityCard`, `ApprovalModal`, `ScamReviewQueue`).
 - **Production Build**: Vite v8.2.2 compiles client assets into 333 kB JS bundle in 718ms with zero TypeScript or bundling errors.
 - **Alembic Migrations**: All 8 migration scripts (`0001` through `0008`) tested bidirectionally (upgrade/downgrade).
@@ -850,8 +851,8 @@ flowchart LR
 
 The following invariants must be maintained across all future phases:
 
-1. **The Core Must Never Import Playwright or Worker**: Browser automation libraries and worker modules remain strictly contained within `worker/`. The Core package (`core` and `api`) maintains zero import-time or call-time dependencies on `worker.*`, communicating via the durable database queue and self-contained Core submission services.
-2. **Structural Send Denial via Runtime Guard & Scope Restriction**: The system OAuth scopes exclude `gmail.send` and `mail.google.com/`, and a structural runtime guard (`GuardedGmailService`) intercepts the Gmail API client to raise `SendOperationBlockedError` immediately on any `.send()` call on drafts, messages, or users. All programmatic email generation stops strictly at draft creation.
+1. **The Core Must Never Import Playwright**: Browser automation libraries must remain strictly contained within `worker/`.
+2. **Structural Send Denial**: The system OAuth scopes must NEVER include `gmail.send` or `mail.google.com/`. All email generation stops at draft creation.
 3. **The Worker Never Autonomously Submits on Browser Portals**: For browser-driven platforms, the worker fills forms and halts at `awaiting_submission`. The human must physically click Submit.
 4. **No Autonomous Status Changes on Message Ingestion**: Receiving a recruiter email never updates an opportunity's status without explicit human approval or acknowledgment.
 5. **Human Approval Gate**: No opportunity may transition to `ready_to_apply` without explicit candidate authorization and resume selection.

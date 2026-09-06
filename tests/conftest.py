@@ -37,6 +37,7 @@ def engine():
     def _set_pragmas(dbapi_conn, _rec):
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
         cursor.close()
 
     Base.metadata.create_all(eng)

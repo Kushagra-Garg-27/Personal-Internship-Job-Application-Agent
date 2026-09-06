@@ -19,10 +19,16 @@ engine = create_engine(
 
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragmas(dbapi_connection, _connection_record):
-    """Enable WAL mode and foreign-key enforcement on every new connection."""
+    """Enable WAL mode, foreign-key enforcement, and busy_timeout on every new connection.
+
+    busy_timeout = 5 000 ms lets concurrent writers (Core FastAPI + Worker
+    process sharing the same SQLite file) wait up to 5 s for the write lock
+    instead of raising an immediate ``OperationalError: database is locked``.
+    """
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")
     cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
 
