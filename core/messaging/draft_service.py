@@ -14,6 +14,8 @@ from email.message import EmailMessage
 import logging
 from typing import Any
 
+from core.discovery.gmail_client import guard_gmail_service
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +59,8 @@ def create_gmail_draft(
         raise ValueError("Cannot create Gmail draft without recipient email.")
     if not body_text or not body_text.strip():
         raise ValueError("Cannot create Gmail draft with empty body text.")
+
+    service = guard_gmail_service(service)
 
     # Format subject
     clean_subject = (subject or "Job Application Follow-up").strip()

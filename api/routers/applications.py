@@ -102,11 +102,10 @@ def confirm_submit_application(
     - For Experimental browser tier (Internshala/Unstop): Confirms that the candidate
       has physically clicked Submit in the open browser window and transitions DB state.
     """
-    from worker.engine.filler import ApplicationFiller
+    from core.services import submission_service
 
-    filler = ApplicationFiller()
     try:
-        result = filler.confirm_and_submit(db, application_id)
+        result = submission_service.confirm_and_submit(db, application_id)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

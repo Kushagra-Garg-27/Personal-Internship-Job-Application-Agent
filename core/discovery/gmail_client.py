@@ -23,16 +23,135 @@ from core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Gmail OAuth Scopes
-# Hard architectural invariant (Phase 10):
-# Strictly limited to readonly and compose (drafts). "gmail.send" is DELIBERATELY
-# EXCLUDED so that the system credentials are structurally incapable of sending emails.
-# The system only creates drafts; the human physically opens Gmail and hits Send.
+# Gmail OAuth Scopes & Structural Send Denial:
+# We request only 'gmail.readonly' and 'gmail.compose'. 'gmail.send' is excluded
+# by design to enforce least-privilege access.
+#
+# NOTE ON STRUCTURAL GUARANTEE:
+# Under Google's Gmail API specifications, the 'gmail.compose' scope is accepted as
+# sufficient authorization for 'users.drafts.send' in addition to draft creation.
+# Therefore, scope restriction alone is necessary but NOT sufficient to prevent sending.
+# To make the send-denial guarantee truly structural and unbreakable at runtime,
+# build_gmail_service() wraps the Google API client in GuardedGmailService.
+# Any call to .send() on drafts(), messages(), or users() raises SendOperationBlockedError
+# immediately, preventing any outbound email transmission before reaching Google's servers.
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
 ]
 
+
+class SendOperationBlockedError(RuntimeError):
+    """Raised when any programmatic email sending is attempted.
+
+    Hard architectural invariant:
+    Under no circumstances may this system send emails programmatically.
+    All sending requires the human candidate to physically open Gmail and click Send.
+    """
+
+
+class GuardedDraftsResource:
+    """Wrapper around users().drafts() that strictly denies any send() calls."""
+
+    def __init__(self, raw_drafts: Any) -> None:
+        self._raw_drafts = raw_drafts
+
+    def send(self, *args: Any, **kwargs: Any) -> Any:
+        raise SendOperationBlockedError(
+            "Programmatic email sending via drafts().send() is structurally blocked. "
+            "Hard architectural invariant: only drafts().create() is permitted; "
+            "the human candidate must physically open Gmail and click Send."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "send":
+            raise SendOperationBlockedError(
+                "Programmatic email sending via drafts().send() is structurally blocked."
+            )
+        return getattr(self._raw_drafts, name)
+
+
+class GuardedMessagesResource:
+    """Wrapper around users().messages() that strictly denies any send() calls."""
+
+    def __init__(self, raw_messages: Any) -> None:
+        self._raw_messages = raw_messages
+
+    def send(self, *args: Any, **kwargs: Any) -> Any:
+        raise SendOperationBlockedError(
+            "Programmatic email sending via messages().send() is structurally blocked. "
+            "Hard architectural invariant: only draft creation is permitted; "
+            "the human candidate must physically open Gmail and click Send."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "send":
+            raise SendOperationBlockedError(
+                "Programmatic email sending via messages().send() is structurally blocked."
+            )
+        return getattr(self._raw_messages, name)
+
+
+class GuardedUsersResource:
+    """Wrapper around users() that intercepts drafts() and messages()."""
+
+    def __init__(self, raw_users: Any) -> None:
+        self._raw_users = raw_users
+
+    def drafts(self) -> GuardedDraftsResource:
+        return GuardedDraftsResource(self._raw_users.drafts())
+
+    def messages(self) -> GuardedMessagesResource:
+        return GuardedMessagesResource(self._raw_users.messages())
+
+    def send(self, *args: Any, **kwargs: Any) -> Any:
+        raise SendOperationBlockedError(
+            "Programmatic email sending via users().send() is structurally blocked."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "send":
+            raise SendOperationBlockedError(
+                "Programmatic email sending via users().send() is structurally blocked."
+            )
+        return getattr(self._raw_users, name)
+
+
+class GuardedGmailService:
+    """Runtime guard wrapping the Gmail API Resource client.
+
+    Enforces the structural invariant that the system can never autonomously
+    or programmatically send emails.
+    """
+
+    def __init__(self, raw_service: Any) -> None:
+        if isinstance(raw_service, GuardedGmailService):
+            self._raw_service = raw_service._raw_service
+        else:
+            self._raw_service = raw_service
+
+    def users(self) -> GuardedUsersResource:
+        return GuardedUsersResource(self._raw_service.users())
+
+    def send(self, *args: Any, **kwargs: Any) -> Any:
+        raise SendOperationBlockedError(
+            "Programmatic email sending via Gmail service is structurally blocked. "
+            "Only draft creation is permitted; human must physically send in Gmail."
+        )
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "send":
+            raise SendOperationBlockedError(
+                "Programmatic email sending via Gmail service is structurally blocked."
+            )
+        return getattr(self._raw_service, name)
+
+
+def guard_gmail_service(raw_service: Any) -> Any:
+    """Wrap a Gmail API client in GuardedGmailService if not already guarded."""
+    if raw_service is None or isinstance(raw_service, GuardedGmailService):
+        return raw_service
+    return GuardedGmailService(raw_service)
 
 
 def _load_credentials(
@@ -83,14 +202,15 @@ def build_gmail_service(
     credentials_file: Path | None = None,
     token_file: Path | None = None,
 ):
-    """Build and return a Gmail API service, or ``None`` if not configured."""
+    """Build and return a GuardedGmailService API service, or ``None`` if not configured."""
     creds = _load_credentials(credentials_file, token_file)
     if creds is None:
         return None
 
     from googleapiclient.discovery import build
 
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    raw_service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return guard_gmail_service(raw_service)
 
 
 # ── State persistence (history ID tracking) ──────────────────────────────
