@@ -748,6 +748,35 @@ tests/worker/test_worker_watcher.py .                                    [100%]
   - End-to-end receipt of actual Telegram bot and WhatsApp messages on mobile hardware.
   - Physical transmission of emails from the candidate's Gmail inbox.
 
+### 10.3 Continuous Integration (GitHub Actions)
+- **Trigger**: `.github/workflows/ci.yml` runs on every push to `main` and on every pull request. A failing job fails the check; no quality gate is optional or skippable.
+- **Backend job** (`ubuntu-latest`, Python 3.12):
+  1. Installs CPU-only PyTorch (CI runners have no GPU).
+  2. Installs backend dependencies from `pyproject.toml` (`pip install -e ".[dev]"`) plus the worker's `worker/requirements.txt` (Playwright + cryptography, imported by `tests/worker` at collection time).
+  3. Pre-downloads and caches the local embedding model (`all-MiniLM-L6-v2`) so relevance tests run deterministically.
+  4. Installs Playwright Chromium (used by the Internshala/Unstop adapter tests against local HTML fixtures).
+  5. Runs the complete authoritative suite: `python -m pytest`.
+- **Frontend job** (`ubuntu-latest`, Node.js 22):
+  1. `npm ci` from the committed `package-lock.json`.
+  2. `npm run lint` (oxlint).
+  3. `npm test` (vitest, jsdom).
+  4. `npm run build` (`tsc -b && vite build`) as the production build gate.
+- **Credentials**: No CI job requires Gmail, Telegram, WhatsApp, Greenhouse, Lever, Internshala, Unstop, Gemini, or other production credentials; all external integrations are mocked in the tests.
+- **Local reproduction** of the same gates:
+  ```bash
+  # Backend
+  pip install -e ".[dev]" -r worker/requirements.txt
+  python -m pytest
+
+  # Frontend
+  cd frontend
+  npm ci
+  npm run lint
+  npm test
+  npm run build
+  ```
+- **Known CI-only notes**: `frontend/tsconfig.node.json` declares its input via the `files` array rather than `include` because the native TypeScript 7 (typescript-go) compiler on Windows fails to resolve a lone literal `include: ["vite.config.ts"]` entry (TS18003); `files` is semantically equivalent and resolves on all platforms.
+
 ---
 
 ## 11. Frontend Dashboard Architecture
