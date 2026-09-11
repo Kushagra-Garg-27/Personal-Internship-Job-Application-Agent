@@ -59,6 +59,16 @@ class ProfileCreate(BaseModel):
     salary_floor: int | None = None
     role_types: list[str] | None = None
 
+    # ── Candidate application attributes (U4.1) ───────────────────────
+    # Explicit, candidate-provided values required by the live Unstop form.
+    # Nullable with no defaults; absent values stay absent (REQUIRES_USER).
+    organization: str | None = None
+    designation: str | None = None
+    work_experience: str | None = None
+    user_type: str | None = None
+    gender: str | None = None
+    differently_abled: str | None = None
+
     # Nested child creation (optional)
     education: list[EducationCreate] | None = None
     skills: list[SkillCreate] | None = None
@@ -81,6 +91,14 @@ class ProfileUpdate(BaseModel):
     salary_floor: int | None = None
     role_types: list[str] | None = None
 
+    # ── Candidate application attributes (U4.1) ───────────────────────
+    organization: str | None = None
+    designation: str | None = None
+    work_experience: str | None = None
+    user_type: str | None = None
+    gender: str | None = None
+    differently_abled: str | None = None
+
     # Append new children (does not replace existing)
     education: list[EducationCreate] | None = None
     skills: list[SkillCreate] | None = None
@@ -100,6 +118,14 @@ class ProfileResponse(BaseModel):
     remote_preference: str | None = None
     salary_floor: int | None = None
     role_types: list[str] | None = None
+
+    # ── Candidate application attributes (U4.1) ───────────────────────
+    organization: str | None = None
+    designation: str | None = None
+    work_experience: str | None = None
+    user_type: str | None = None
+    gender: str | None = None
+    differently_abled: str | None = None
 
     education: list[EducationResponse] = []
     skills: list[SkillResponse] = []

@@ -69,6 +69,39 @@ class ReliabilityTier(StrEnum):
     DISCOVERY_ONLY = "discovery_only"
 
 
+# ── Explicit human submission approval token (Phase 9 / Unstop V1 - U4) ──
+#
+# The irreversible submission boundary may only be crossed when this exact
+# token is supplied by a *human* confirmation action. It is deliberately a
+# required, value-carrying argument rather than a boolean flag so that no
+# code path can cross the boundary by accident, by default, by omission, or
+# by interpreting an unrelated signal — status, valid form, successful
+# autofill, prior user instructions, test execution, timeout, or a default
+# value — as approval.
+HUMAN_SUBMISSION_APPROVAL_TOKEN = "HUMAN_CONFIRMED_SUBMIT"
+
+
+class SubmissionApprovalRequiredError(Exception):
+    """Raised when a submission is attempted without explicit human approval."""
+
+    def __init__(self, detail: str | None = None):
+        self.detail = detail or (
+            "Explicit human approval is required before submission. "
+            f"Pass approval_token={HUMAN_SUBMISSION_APPROVAL_TOKEN!r} "
+            "from a human confirmation action."
+        )
+        super().__init__(self.detail)
+
+
+def is_human_approved(approval_token: str | None) -> bool:
+    """Return True only when the caller supplied the exact human approval token.
+
+    Anything else — ``None``, an empty string, a boolean, a status name, a
+    default value, or any inferred signal — is NOT approval.
+    """
+    return isinstance(approval_token, str) and approval_token == HUMAN_SUBMISSION_APPROVAL_TOKEN
+
+
 # ── Canonical vocabulary mapping & normalizer ────────────────────────────
 
 LEGACY_OPPORTUNITY_STATUS_MAP: dict[str, OpportunityStatus] = {

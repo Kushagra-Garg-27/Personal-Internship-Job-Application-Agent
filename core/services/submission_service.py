@@ -8,6 +8,14 @@ Handles:
   and ambiguous-timeout recovery status checks.
 - Experimental Browser tier (Internshala, Unstop): Confirms that the candidate has
   physically clicked Submit in the open browser window and transitions database state.
+
+HARD INVARIANT (Unstop V1 - U4):
+    Every write path that crosses the irreversible submission boundary requires
+    the caller to supply an explicit human approval token
+    (`HUMAN_SUBMISSION_APPROVAL_TOKEN`). Reaching a pre-submit state
+    (`ready_for_review`, `awaiting_submission`, `form_filled`), a valid form, a
+    successful autofill, a prior instruction, a test run, a timeout, a default
+    value, or any agent assumption is NEVER approval.
 """
 
 from __future__ import annotations
@@ -23,7 +31,13 @@ from sqlalchemy.orm import Session
 
 from core.models.opportunity import Application, Opportunity
 from core.services import application_service, opportunity_service
-from core.status import ApplicationStatus, OpportunityStatus, ReliabilityTier
+from core.status import (
+    ApplicationStatus,
+    OpportunityStatus,
+    ReliabilityTier,
+    SubmissionApprovalRequiredError,
+    is_human_approved,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +176,11 @@ def confirm_and_submit(
     session: Session,
     application_id: int,
     *,
+    approval_token: str | None = None,
+    approval_actor: str = "human_submission",
+    platform_confirmed: bool = False,
+    confirmation_ref: str | None = None,
+    confirmation_detail: str | None = None,
     http_client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """Human confirmation action to execute submission or confirm physical browser submission.
@@ -172,6 +191,21 @@ def confirm_and_submit(
         SQLAlchemy database session.
     application_id : int
         ID of the application being confirmed.
+    approval_token : str | None
+        REQUIRED. Must equal ``HUMAN_SUBMISSION_APPROVAL_TOKEN``. This is the
+        only accepted proof of explicit human approval; the absence of a token
+        fails closed.
+    approval_actor : str
+        Audit label for the approving human actor.
+    platform_confirmed : bool
+        For the Experimental browser tier: ``True`` only when the platform
+        itself was observed to report the submission as received. A missing
+        platform confirmation leaves the application in its pre-submit review
+        state instead of writing a false ``submitted`` status.
+    confirmation_ref : str | None
+        Platform-reported confirmation reference, when available.
+    confirmation_detail : str | None
+        Human-readable detail describing the platform confirmation.
     http_client : httpx.Client | None
         Optional HTTP client for dependency injection in tests.
 
@@ -182,12 +216,39 @@ def confirm_and_submit(
 
     Raises
     ------
+    SubmissionApprovalRequiredError
+        If no valid explicit human approval token was supplied.
     ValueError
-        If application or opportunity not found, or opportunity is not awaiting_submission.
+        If application or opportunity not found, opportunity is not
+        awaiting_submission, or the application is already submitted.
     """
+    # ── Human approval gate (fail closed) ─────────────────────────────
+    if not is_human_approved(approval_token):
+        raise SubmissionApprovalRequiredError(
+            f"Application {application_id} submission blocked: no explicit human approval token. "
+            "ready_for_review, a valid form, successful autofill, prior instructions, test "
+            "execution, timeouts, defaults, and agent assumptions are NOT approval."
+        )
+
     app = session.get(Application, application_id)
     if app is None:
         raise ValueError(f"Application {application_id} not found.")
+
+    # ── Duplicate submission protection ───────────────────────────────
+    if app.status == ApplicationStatus.SUBMITTED.value:
+        raise ValueError(
+            f"Application {application_id} is already submitted "
+            f"(confirmation_ref={app.confirmation_ref!r}, submitted_at={app.submitted_at}). "
+            "Duplicate submission refused."
+        )
+    if app.status not in {
+        ApplicationStatus.FORM_FILLED.value,
+        ApplicationStatus.PENDING.value,
+    }:
+        raise ValueError(
+            f"Cannot submit application in status {app.status!r}; "
+            "must be 'form_filled' or 'pending'."
+        )
 
     opp = session.get(Opportunity, app.opportunity_id)
     if opp is None:
@@ -218,30 +279,70 @@ def confirm_and_submit(
     )
 
     # ── Experimental Browser Tier ─────────────────────────────────────
-    # Candidate physically clicked submit in the opened browser window;
-    # this confirm action updates and persists the confirmed state.
+    # The candidate physically clicked submit in the opened browser window.
+    # We only record success when the platform itself confirmed receipt;
+    # anything else stays in the pre-submit review state (never a false
+    # `submitted`).
     if is_browser_tier:
+        if not platform_confirmed:
+            unconfirmed_reason = (
+                confirmation_detail
+                or "Platform confirmation not observed after human-approved submission."
+            )
+            logger.error(
+                "Browser-tier submission for application #%d was approved but NOT confirmed by %s: %s",
+                app.id,
+                adapter_name,
+                unconfirmed_reason,
+            )
+            return {
+                "success": False,
+                "status": "unconfirmed",
+                "confirmed": False,
+                "mode": "browser_confirmed",
+                "reason": unconfirmed_reason,
+                "opportunity_status": opp.status,
+                "application_status": app.status,
+            }
+
         now = datetime.now(timezone.utc)
-        conf_ref = f"BROWSER-{adapter_name.upper()}-SUBMITTED"
+        conf_ref = confirmation_ref or f"BROWSER-{adapter_name.upper()}-CONFIRMED"
+        details = {
+            **(notes_data or {}),
+            "submission_confirmation": {
+                "source": "platform",
+                "confirmed": True,
+                "confirmation_ref": conf_ref,
+                "detail": confirmation_detail,
+                "confirmed_at": now.isoformat(),
+                "approved_by": approval_actor,
+            },
+        }
         application_service.update_application_status(
             session,
             app.id,
             status="submitted",
             submitted_at=now,
             confirmation_ref=conf_ref,
+            notes=json.dumps(details, default=str),
         )
         opportunity_service.transition_status(
             session,
             opp.id,
             OpportunityStatus.APPLIED,
-            reason=f"Human confirmed physical submission in {adapter_name} browser window",
-            actor="human_submission",
+            reason=(
+                f"Explicit human approval ({approval_actor}) and platform-confirmed "
+                f"submission in {adapter_name} ({conf_ref})"
+            ),
+            actor=approval_actor,
         )
         session.commit()
         return {
             "success": True,
             "status": "applied",
+            "confirmed": True,
             "confirmation_ref": conf_ref,
+            "confirmation_detail": confirmation_detail,
             "submitted_at": now.isoformat(),
             "mode": "browser_confirmed",
         }
@@ -323,28 +424,41 @@ def confirm_and_submit(
         session.commit()
         return {"success": False, "status": "manual_required", "reason": error_msg}
 
-    # Submission succeeded!
+    # Human-approved HTTP submission succeeded and returned platform confirmation.
     now = datetime.now(timezone.utc)
     conf_ref = result.get("confirmation_ref") or "SUBMITTED-OK"
+    details = {
+        **(notes_data or {}),
+        "submission_confirmation": {
+            "source": "platform",
+            "confirmed": True,
+            "confirmation_ref": conf_ref,
+            "status_code": result.get("status_code"),
+            "confirmed_at": now.isoformat(),
+            "approved_by": approval_actor,
+        },
+    }
     application_service.update_application_status(
         session,
         app.id,
         status="submitted",
         submitted_at=now,
         confirmation_ref=conf_ref,
+        notes=json.dumps(details, default=str),
     )
     opportunity_service.transition_status(
         session,
         opp.id,
         OpportunityStatus.APPLIED,
-        reason="Application successfully submitted by user confirmation",
-        actor="human_submission",
+        reason="Application successfully submitted after explicit human approval",
+        actor=approval_actor,
     )
     session.commit()
 
     return {
         "success": True,
         "status": "applied",
+        "confirmed": True,
         "confirmation_ref": conf_ref,
         "submitted_at": now.isoformat(),
     }

@@ -95,6 +95,9 @@ class UnstopAdapter(BasePlatformAdapter):
 
     adapter_name = "unstop"
     tier = ReliabilityTier.EXPERIMENTAL
+    # Unstop uploads the resume file directly into the form, so a real,
+    # on-disk resume is mandatory; a missing file fails closed.
+    requires_resume = True
 
     def __init__(
         self,
@@ -1073,20 +1076,209 @@ class UnstopAdapter(BasePlatformAdapter):
             )
 
     def check_status(self, app_ctx: ApplicationContext) -> SubmissionStatus:
-        """Check if application was already submitted on Unstop."""
+        """Check if application was already submitted on Unstop.
+
+        Read-only, idempotent confirmation probe. It never clicks anything and
+        never mutates platform state, so it is safe to call before and after a
+        human-approved submission.
+        """
         page = app_ctx.browser_page
         if page is None:
             return SubmissionStatus(confirmed=False, status="unknown", detail="No active browser page")
 
         try:
-            applied_el = page.locator("text='Registered', text='Applied', text='Application Completed'")
-            if applied_el.count() > 0 and applied_el.first.is_visible():
+            # 1. Hard confirmation signals rendered by Unstop after a successful
+            #    registration (confirmation screen / success URL).
+            url = (page.url or "").lower()
+            url_confirmed = any(
+                marker in url for marker in ("success", "/registered", "thank-you", "confirmation")
+            )
+
+            confirmed_selectors = [
+                "text='Successfully Registered'",
+                "text='Registration Successful'",
+                "text='You have successfully registered'",
+                "text='Application Submitted'",
+                "text='Application Completed'",
+                "text='Already Registered'",
+                "text='Registered Successfully'",
+                "text='Your application has been submitted'",
+                "text='Thank you for registering'",
+            ]
+            matched: str | None = None
+            for sel in confirmed_selectors:
+                loc = page.locator(sel)
+                try:
+                    if loc.count() > 0 and loc.first.is_visible():
+                        matched = sel
+                        break
+                except Exception:
+                    continue
+
+            if matched or url_confirmed:
                 return SubmissionStatus(
                     confirmed=True,
                     status="confirmed",
-                    detail="Unstop indicates application is already submitted.",
+                    confirmation_ref=f"UNSTOP-CONFIRMED-{app_ctx.opportunity_id}",
+                    detail=(
+                        f"Unstop confirmed submission via {matched or 'success URL'} "
+                        f"(url={page.url})."
+                    ),
                 )
-            return SubmissionStatus(confirmed=False, status="not_submitted", detail="Not yet submitted")
+
+            # 2. Explicit pre-submit state: form still open and unsubmitted.
+            if page.url and "/register" in page.url:
+                return SubmissionStatus(
+                    confirmed=False,
+                    status="not_submitted",
+                    detail="Unstop registration form is still open and unsubmitted.",
+                )
+
+            # 3. Anything else is genuinely ambiguous — never treated as success.
+            return SubmissionStatus(
+                confirmed=False,
+                status="ambiguous",
+                detail=f"No Unstop confirmation signal observed at url={page.url}.",
+            )
         except Exception as exc:
             return SubmissionStatus(confirmed=False, status="ambiguous", detail=str(exc))
+
+    # ── Explicit human-approved submission boundary (U4) ──────────────────
+    #
+    # The default fill() contract leaves the browser open and NEVER submits.
+    # submit_application() is the single, explicitly named method that may
+    # click the final control, and it is callable ONLY by passing the exact
+    # human approval token after the human has reviewed the filled form.
+    # Everything else — ready_for_review, a valid form, a successful autofill,
+    # a prior instruction, a test run, a timeout, a default, or an agent
+    # assumption — fails closed here.
+
+    def submit_application(
+        self,
+        app_ctx: ApplicationContext,
+        *,
+        approval_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Click the final Unstop submit control and verify real platform confirmation.
+
+        Parameters
+        ----------
+        app_ctx : ApplicationContext
+            Live context holding the filled, reviewed page.
+        approval_token : str | None
+            Must equal ``HUMAN_SUBMISSION_APPROVAL_TOKEN``. Absent/incorrect
+            tokens raise before any browser interaction occurs.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{"success", "confirmed", "confirmation_ref", "detail", ...}``.
+            ``success`` is True only when Unstop itself reported confirmation.
+        """
+        from core.status import HUMAN_SUBMISSION_APPROVAL_TOKEN
+
+        if not (isinstance(approval_token, str) and approval_token == HUMAN_SUBMISSION_APPROVAL_TOKEN):
+            raise PermissionError(
+                "Unstop submit refused: explicit human approval token required. "
+                "ready_for_review is not approval."
+            )
+
+        page = app_ctx.browser_page
+        if page is None:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "No active browser page available for Unstop submission.",
+            }
+
+        # Fail closed on bot challenges — never attempt to bypass them.
+        if page.locator("iframe[src*='challenges.cloudflare'], div#challenge-stage").count() > 0:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "Cloudflare bot verification present; human interaction required. Not bypassed.",
+            }
+
+        # Refuse to submit twice on the same live page.
+        pre_status = self.check_status(app_ctx)
+        if pre_status.confirmed:
+            return {
+                "success": True,
+                "confirmed": True,
+                "already_confirmed": True,
+                "confirmation_ref": pre_status.confirmation_ref,
+                "detail": pre_status.detail,
+            }
+
+        clicked: str | None = None
+        last_error: str | None = None
+        for sel in self.SUBMISSION_SELECTORS:
+            loc = page.locator(sel)
+            try:
+                if loc.count() == 0:
+                    continue
+                btn = loc.first
+                if not btn.is_visible():
+                    continue
+                if not btn.is_enabled():
+                    continue
+                btn.click()
+                clicked = sel
+                break
+            except Exception as exc:
+                last_error = f"{sel}: {exc}"
+                continue
+
+        if clicked is None:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": f"No enabled Unstop submit control found. Last error: {last_error}",
+            }
+
+        # Confirm the result by observing the platform, never by assuming that
+        # a successful click means a successful submission.
+        confirmation = self.wait_for_confirmation(app_ctx, timeout_ms=45000)
+        return {
+            "success": bool(confirmation.confirmed),
+            "confirmed": bool(confirmation.confirmed),
+            "confirmation_ref": confirmation.confirmation_ref,
+            "detail": confirmation.detail,
+            "clicked_selector": clicked,
+            "url": page.url,
+        }
+
+    def wait_for_confirmation(
+        self,
+        app_ctx: ApplicationContext,
+        *,
+        timeout_ms: int = 45000,
+        poll_ms: int = 1500,
+    ) -> SubmissionStatus:
+        """Poll read-only for an actual Unstop confirmation signal after submission."""
+        page = app_ctx.browser_page
+        if page is None:
+            return SubmissionStatus(confirmed=False, status="unknown", detail="No active browser page")
+
+        elapsed = 0
+        last = SubmissionStatus(confirmed=False, status="unknown", detail="No signal yet")
+        while elapsed <= timeout_ms:
+            last = self.check_status(app_ctx)
+            if last.confirmed:
+                return last
+            try:
+                page.wait_for_timeout(poll_ms)
+            except Exception:
+                break
+            elapsed += poll_ms
+
+        return SubmissionStatus(
+            confirmed=False,
+            status=last.status,
+            detail=(
+                f"Unstop did not report confirmation within {timeout_ms}ms "
+                f"(last observed state: {last.status} — {last.detail}). "
+                "Result is UNCONFIRMED and must not be recorded as submitted."
+            ),
+        )
 

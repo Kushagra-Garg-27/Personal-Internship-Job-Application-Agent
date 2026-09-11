@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -18,7 +19,13 @@ from core.models.profile import Profile
 from core.models.resume import Resume
 from core.repositories import profile_repo
 from core.services import application_service, opportunity_service
-from core.status import ApplicationStatus, OpportunityStatus, ReliabilityTier
+from core.status import (
+    ApplicationStatus,
+    OpportunityStatus,
+    ReliabilityTier,
+    SubmissionApprovalRequiredError,
+    is_human_approved,
+)
 from worker.adapters.base import BasePlatformAdapter, FillResult, SubmissionStatus
 from worker.adapters.registry import (
     DiscoveryOnlyRejectionError,
@@ -63,6 +70,16 @@ def serialize_profile(profile: Profile | None) -> dict[str, Any]:
         "education": edu_list,
         "skills": skills_list,
         "links": links_list,
+        # Candidate application attributes required by the Unstop flow.
+        # Emitted only when explicitly present so an absent value stays
+        # absent and the Unstop adapter classifies it as REQUIRES_USER.
+        # Never inferred, never defaulted.
+        "organization": profile.organization,
+        "designation": profile.designation,
+        "work_experience": profile.work_experience,
+        "user_type": profile.user_type,
+        "gender": profile.gender,
+        "differently_abled": profile.differently_abled,
     }
 
 
@@ -130,6 +147,27 @@ class ApplicationFiller:
             adapter = resolve_adapter(opp)
         except (DiscoveryOnlyRejectionError, UnsupportedPlatformError) as exc:
             reason = str(exc)
+            opportunity_service.transition_status(
+                session,
+                opp.id,
+                OpportunityStatus.MANUAL_APPLICATION_REQUIRED,
+                reason=reason,
+                actor="worker",
+            )
+            session.commit()
+            return {"status": "manual_required", "reason": reason}
+
+        # 4b. Resume availability gate (browser-tier adapters upload the file
+        # directly).  A missing or unreadable resume must fail closed as
+        # REAL_RESUME_REQUIRED — never fabricate or substitute a test fixture.
+        if getattr(adapter, "requires_resume", False) and not (
+            resume_path and Path(resume_path).exists()
+        ):
+            reason = (
+                "REAL_RESUME_REQUIRED: no active, on-disk resume is available for "
+                f"'{adapter.adapter_name}'. Upload the real candidate resume before "
+                "filling this application."
+            )
             opportunity_service.transition_status(
                 session,
                 opp.id,
@@ -239,13 +277,47 @@ class ApplicationFiller:
         self,
         session: Session,
         application_id: int,
+        *,
+        approval_token: str | None = None,
+        approval_actor: str = "human_submission",
+        platform_confirmed: bool = False,
+        confirmation_ref: str | None = None,
+        confirmation_detail: str | None = None,
     ) -> dict[str, Any]:
         """Human confirmation action to execute submission for stable HTTP adapters.
         Handles ambiguous timeouts by verifying status before retry.
+
+        Requires an explicit human approval token
+        (``HUMAN_SUBMISSION_APPROVAL_TOKEN``). Every other signal — awaiting_submission,
+        a valid form, a successful fill, prior instructions, test execution, timeouts,
+        defaults, or agent assumptions — fails closed.
         """
+        # ── Human approval gate (fail closed) ─────────────────────────
+        if not is_human_approved(approval_token):
+            raise SubmissionApprovalRequiredError(
+                f"Application {application_id} submission blocked: no explicit human approval token. "
+                "Form-filled/awaiting-submission state is NOT approval."
+            )
+
         app = session.get(Application, application_id)
         if app is None:
             raise ValueError(f"Application {application_id} not found.")
+
+        # ── Duplicate submission protection ───────────────────────────
+        if app.status == ApplicationStatus.SUBMITTED.value:
+            raise ValueError(
+                f"Application {application_id} is already submitted "
+                f"(confirmation_ref={app.confirmation_ref!r}, submitted_at={app.submitted_at}). "
+                "Duplicate submission refused."
+            )
+        if app.status not in {
+            ApplicationStatus.FORM_FILLED.value,
+            ApplicationStatus.PENDING.value,
+        }:
+            raise ValueError(
+                f"Cannot submit application in status {app.status!r}; "
+                "must be 'form_filled' or 'pending'."
+            )
 
         opp = session.get(Opportunity, app.opportunity_id)
         if opp is None:
@@ -266,30 +338,69 @@ class ApplicationFiller:
         adapter = resolve_adapter(opp)
 
         # ── Experimental Browser Tier ─────────────────────────────────
-        # Candidate physically clicked submit in the opened browser window;
-        # this confirm action updates and persists the confirmed state.
+        # The candidate physically clicked submit in the opened browser window.
+        # Success is recorded only when the platform itself confirmed receipt;
+        # an unconfirmed outcome keeps the application in its pre-submit review
+        # state and never writes a false `submitted`.
         if not hasattr(adapter, "execute_submission"):
+            if not platform_confirmed:
+                unconfirmed_reason = (
+                    confirmation_detail
+                    or "Platform confirmation not observed after human-approved submission."
+                )
+                logger.error(
+                    "Browser-tier submission for application #%d was approved but NOT confirmed: %s",
+                    app.id,
+                    unconfirmed_reason,
+                )
+                return {
+                    "success": False,
+                    "status": "unconfirmed",
+                    "confirmed": False,
+                    "mode": "browser_confirmed",
+                    "reason": unconfirmed_reason,
+                    "opportunity_status": opp.status,
+                    "application_status": app.status,
+                }
+
             now = datetime.now(timezone.utc)
-            conf_ref = f"BROWSER-{adapter.adapter_name.upper()}-SUBMITTED"
+            conf_ref = confirmation_ref or f"BROWSER-{adapter.adapter_name.upper()}-CONFIRMED"
+            details = {
+                **(notes_data or {}),
+                "submission_confirmation": {
+                    "source": "platform",
+                    "confirmed": True,
+                    "confirmation_ref": conf_ref,
+                    "detail": confirmation_detail,
+                    "confirmed_at": now.isoformat(),
+                    "approved_by": approval_actor,
+                },
+            }
             application_service.update_application_status(
                 session,
                 app.id,
                 status="submitted",
                 submitted_at=now,
                 confirmation_ref=conf_ref,
+                notes=json.dumps(details, default=str),
             )
             opportunity_service.transition_status(
                 session,
                 opp.id,
                 OpportunityStatus.APPLIED,
-                reason=f"Human confirmed physical submission in {adapter.adapter_name} browser window",
-                actor="human_submission",
+                reason=(
+                    f"Explicit human approval ({approval_actor}) and platform-confirmed "
+                    f"submission in {adapter.adapter_name} ({conf_ref})"
+                ),
+                actor=approval_actor,
             )
             session.commit()
             return {
                 "success": True,
                 "status": "applied",
+                "confirmed": True,
                 "confirmation_ref": conf_ref,
+                "confirmation_detail": confirmation_detail,
                 "submitted_at": now.isoformat(),
                 "mode": "browser_confirmed",
             }
@@ -367,28 +478,41 @@ class ApplicationFiller:
             session.commit()
             return {"success": False, "status": "manual_required", "reason": error_msg}
 
-        # Submission succeeded!
+        # Human-approved HTTP submission succeeded and returned platform confirmation.
         now = datetime.now(timezone.utc)
         conf_ref = result.get("confirmation_ref") or "SUBMITTED-OK"
+        details = {
+            **(notes_data or {}),
+            "submission_confirmation": {
+                "source": "platform",
+                "confirmed": True,
+                "confirmation_ref": conf_ref,
+                "status_code": result.get("status_code"),
+                "confirmed_at": now.isoformat(),
+                "approved_by": approval_actor,
+            },
+        }
         application_service.update_application_status(
             session,
             app.id,
             status="submitted",
             submitted_at=now,
             confirmation_ref=conf_ref,
+            notes=json.dumps(details, default=str),
         )
         opportunity_service.transition_status(
             session,
             opp.id,
             OpportunityStatus.APPLIED,
-            reason="Application successfully submitted by user confirmation",
-            actor="human_submission",
+            reason="Application successfully submitted after explicit human approval",
+            actor=approval_actor,
         )
         session.commit()
 
         return {
             "success": True,
             "status": "applied",
+            "confirmed": True,
             "confirmation_ref": conf_ref,
             "submitted_at": now.isoformat(),
         }

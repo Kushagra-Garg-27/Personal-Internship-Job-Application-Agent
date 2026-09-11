@@ -8,6 +8,7 @@ import {
   Sparkles,
   ExternalLink,
   Cpu,
+  UserRound,
 } from 'lucide-react';
 import { api } from '../../api/client';
 
@@ -216,6 +217,28 @@ export const AppLayout: React.FC = () => {
           >
             <Bell size={16} />
             <span>Notifications</span>
+          </NavLink>
+
+          <NavLink
+            to="/profile"
+            style={({ isActive }) => ({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '8px 16px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '0.875rem',
+              fontWeight: 500,
+              textDecoration: 'none',
+              transition: 'all var(--transition-fast)',
+              color: isActive ? '#f5f5f7' : 'var(--text-secondary)',
+              background: isActive ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
+              border: isActive ? '1px solid var(--border-medium)' : '1px solid transparent',
+              boxShadow: isActive ? '0 2px 10px rgba(0,0,0,0.3)' : 'none',
+            })}
+          >
+            <UserRound size={16} />
+            <span>Profile</span>
           </NavLink>
         </nav>
 

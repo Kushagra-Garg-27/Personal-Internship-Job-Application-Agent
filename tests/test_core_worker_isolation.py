@@ -16,7 +16,16 @@ from fastapi.testclient import TestClient
 
 from core.models.opportunity import Application, Opportunity
 from core.services import application_service, opportunity_service
-from core.status import ApplicationStatus, OpportunityStatus
+from core.status import (
+    HUMAN_SUBMISSION_APPROVAL_TOKEN,
+    ApplicationStatus,
+    OpportunityStatus,
+)
+
+APPROVED_BODY = {
+    "approval_token": HUMAN_SUBMISSION_APPROVAL_TOKEN,
+    "approved_by": "human_user",
+}
 
 
 def test_core_imports_without_worker(monkeypatch):
@@ -65,14 +74,23 @@ def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, 
     monkeypatch.setitem(sys.modules, "worker.engine", None)
     monkeypatch.setitem(sys.modules, "worker.engine.filler", None)
 
-    # Call the API endpoint
-    resp = client.post(f"/applications/{app.id}/confirm-submit")
+    # Call the API endpoint with explicit human approval and platform confirmation
+    resp = client.post(
+        f"/applications/{app.id}/confirm-submit",
+        json={
+            **APPROVED_BODY,
+            "platform_confirmed": True,
+            "confirmation_ref": "BROWSER-INTERNSHALA-CONFIRMED",
+            "confirmation_detail": "Internshala showed 'Application submitted'.",
+        },
+    )
     assert resp.status_code == 200
     data = resp.json()
 
     assert data["success"] is True
     assert data["status"] == "applied"
     assert data["mode"] == "browser_confirmed"
+    assert data["confirmed"] is True
 
     db_session.refresh(opp)
     assert opp.status == OpportunityStatus.APPLIED.value
@@ -126,7 +144,7 @@ def test_confirm_submit_http_tier_without_worker(client: TestClient, db_session,
             "status_code": 200,
         }
 
-        resp = client.post(f"/applications/{app.id}/confirm-submit")
+        resp = client.post(f"/applications/{app.id}/confirm-submit", json=APPROVED_BODY)
         assert resp.status_code == 200
         data = resp.json()
 

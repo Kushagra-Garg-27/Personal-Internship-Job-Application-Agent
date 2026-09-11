@@ -10,6 +10,8 @@ import type {
   NotificationSettings,
   NotificationLogListResponse,
   TestNotificationResponse,
+  CandidateProfile,
+  CandidateProfileUpdate,
 } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
@@ -42,6 +44,29 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  // ── Candidate Profile (U4.1) ────────────────────────────────────────────
+  async listProfiles(): Promise<CandidateProfile[]> {
+    return request<CandidateProfile[]>('/profiles/');
+  },
+
+  async getProfile(profileId: number): Promise<CandidateProfile> {
+    return request<CandidateProfile>(`/profiles/${profileId}`);
+  },
+
+  async updateProfile(
+    profileId: number,
+    fields: CandidateProfileUpdate,
+  ): Promise<CandidateProfile> {
+    return request<CandidateProfile>(`/profiles/${profileId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(fields),
+    });
+  },
+
+  async listProfileResumes(profileId: number): Promise<import('../types').ResumeOption[]> {
+    return request(`/profiles/${profileId}/resumes/`);
+  },
+
   // ── Opportunity Feed (Phase 6) ──────────────────────────────────────────
   async getDashboardFeed(params: {
     status?: string;

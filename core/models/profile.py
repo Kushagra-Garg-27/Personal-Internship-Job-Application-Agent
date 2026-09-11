@@ -36,6 +36,24 @@ class Profile(TimestampMixin, Base):
         JSON, nullable=True
     )  # e.g. ["backend", "data-eng", "ML"]
 
+    # ── Candidate application attributes (Unstop V1 - U4.1) ────────────
+    #
+    # These are explicit candidate-provided values required by the live
+    # Unstop application form.  They are deliberately nullable with NO
+    # defaults: an absent value stays absent and is classified as
+    # REQUIRES_USER by the Unstop adapter.  They are NEVER inferred or
+    # fabricated, and seeded/demo data is not the real source of truth.
+    #
+    # NOTE: platform/application consent (terms acceptance) is intentionally
+    # NOT stored here — consent is application-specific and is supplied at
+    # application time as a custom answer, not a permanent profile attribute.
+    organization: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    designation: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    work_experience: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    user_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    differently_abled: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
     # ── Relationships ─────────────────────────────────────────────────
     education: Mapped[list[ProfileEducation]] = relationship(
         back_populates="profile", cascade="all, delete-orphan", lazy="selectin"

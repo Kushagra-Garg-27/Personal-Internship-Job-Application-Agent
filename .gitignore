@@ -39,9 +39,13 @@ dist/
 build/
 
 # Phase 9: Browser Worker session storage (sensitive credentials)
+#
+# Runtime Playwright storage_state files hold LIVE, ACTIVE session cookies and
+# must never be committed. The generated per-platform session artifacts are
+# ignored broadly, then only the non-secret placeholders are re-included.
 worker/storage/*.json
 worker/storage/*.state
 worker/storage/*.key
 worker/storage/decrypted_*
-!worker/storage/*.enc
+worker/storage/*_storage_state.enc
 !worker/storage/.gitkeep

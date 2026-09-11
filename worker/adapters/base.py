@@ -75,6 +75,12 @@ class BasePlatformAdapter(ABC):
     adapter_name: str
     tier: ReliabilityTier
 
+    #: When True, a real, on-disk resume file is required before this adapter
+    #: may fill an application.  Browser-tier forms (e.g. Unstop) upload the
+    #: file directly, so a missing/unreadable resume must fail closed as
+    #: ``REAL_RESUME_REQUIRED`` rather than proceeding without one.
+    requires_resume: bool = False
+
     @abstractmethod
     def extract(self, opportunity_data: Any) -> ExtractedListing:
         """Extract job details, required fields, and custom questions."""

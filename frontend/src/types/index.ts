@@ -26,6 +26,59 @@ export interface ResumeOption {
   uploaded_at?: string | null;
 }
 
+// ── Candidate Profile (U4.1) ───────────────────────────────────────────
+export interface ProfileEducation {
+  id?: number;
+  degree: string;
+  branch: string;
+  institution: string;
+  graduation_year?: number | null;
+}
+
+export interface ProfileSkill {
+  id?: number;
+  skill_name: string;
+  proficiency?: string | null;
+}
+
+export interface ProfileLink {
+  id?: number;
+  link_type: string;
+  url: string;
+}
+
+export interface CandidateProfile {
+  id: number;
+  name: string;
+  full_name?: string | null;
+  email?: string | null;
+  phone?: string | null;
+  location?: string | null;
+  location_preference?: string | null;
+  remote_preference?: string | null;
+  salary_floor?: number | null;
+  role_types?: string[] | null;
+
+  // Candidate application attributes (Unstop required)
+  organization?: string | null;
+  designation?: string | null;
+  work_experience?: string | null;
+  user_type?: string | null;
+  gender?: string | null;
+  differently_abled?: string | null;
+
+  education: ProfileEducation[];
+  skills: ProfileSkill[];
+  links: ProfileLink[];
+
+  created_at?: string;
+  updated_at?: string;
+}
+
+export type CandidateProfileUpdate = Partial<
+  Omit<CandidateProfile, 'id' | 'created_at' | 'updated_at' | 'education' | 'skills' | 'links'>
+>;
+
 export interface RelevanceExplanation {
   top_skills?: string[];
   matched_skills?: string[];

@@ -5,6 +5,7 @@ import { FeedPage } from './pages/FeedPage';
 import { ScamQueuePage } from './pages/ScamQueuePage';
 import { ResponseCenterPage } from './pages/ResponseCenterPage';
 import { NotificationSettingsPage } from './pages/NotificationSettingsPage';
+import { ProfilePage } from './pages/ProfilePage';
 
 export const App: React.FC = () => {
   return (
@@ -15,6 +16,7 @@ export const App: React.FC = () => {
           <Route path="scam-review" element={<ScamQueuePage />} />
           <Route path="responses" element={<ResponseCenterPage />} />
           <Route path="notifications" element={<NotificationSettingsPage />} />
+          <Route path="profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>

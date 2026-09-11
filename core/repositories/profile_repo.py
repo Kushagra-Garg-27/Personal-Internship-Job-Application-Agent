@@ -75,6 +75,9 @@ _PROFILE_DIRECT_FIELDS = {
     "name", "full_name", "email", "phone", "location",
     "location_preference", "remote_preference", "salary_floor",
     "role_types", "created_at", "updated_at",
+    # Candidate application attributes (U4.1)
+    "organization", "designation", "work_experience",
+    "user_type", "gender", "differently_abled",
 }
 
 
