@@ -1081,7 +1081,7 @@ export const ResponseCenterPlaceholder: React.FC = () => {
                                   />
                                   <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
                                     <button
-                                      disabled={actionLoading[msg.id] !== null}
+                                      disabled={Boolean(actionLoading[msg.id])}
                                       onClick={(e) => handleApproveReply(msg, e)}
                                       style={{
                                         display: 'inline-flex',
@@ -1105,7 +1105,7 @@ export const ResponseCenterPlaceholder: React.FC = () => {
                                     </button>
 
                                     <button
-                                      disabled={actionLoading[msg.id] !== null}
+                                      disabled={Boolean(actionLoading[msg.id])}
                                       onClick={(e) => handleDraftReply(msg.id, e)}
                                       style={{
                                         display: 'inline-flex',
@@ -1141,7 +1141,7 @@ export const ResponseCenterPlaceholder: React.FC = () => {
                                     This message invites a response. Draft an AI-assisted reply tailored to the role and candidate profile.
                                   </div>
                                   <button
-                                    disabled={actionLoading[msg.id] !== null}
+                                    disabled={Boolean(actionLoading[msg.id])}
                                     onClick={(e) => handleDraftReply(msg.id, e)}
                                     style={{
                                       display: 'inline-flex',
@@ -1189,7 +1189,7 @@ export const ResponseCenterPlaceholder: React.FC = () => {
                                 </div>
                               </div>
                               <button
-                                disabled={actionLoading[msg.id] !== null}
+                                disabled={Boolean(actionLoading[msg.id])}
                                 onClick={(e) => handleAcknowledge(msg.id, e)}
                                 style={{
                                   display: 'inline-flex',
