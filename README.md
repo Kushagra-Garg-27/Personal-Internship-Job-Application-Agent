@@ -1,22 +1,27 @@
 # Job Application Agent — Career Intelligence Core
 
-The **Career Intelligence Core** — a Python/FastAPI backend for managing user profiles, versioned resumes, opportunity tracking with a status machine, automated discovery from Greenhouse, Lever, RSS feeds, and Gmail job alerts, and a multi-stage evaluation funnel (deterministic eligibility filter + local embedding relevance scoring). Phases 1–4 of a larger Job/Internship Application Agent.
+> [!IMPORTANT]
+> **Unstop is the sole supported platform for V1 validation.**
+> All active development, browser automation testing, and integration validation in V1 strictly target Unstop. Direct ATS adapters (Greenhouse, Lever) and legacy scrapers remain preserved for architectural continuity but are not expanded.
+
+The **Career Intelligence Core** — a Python/FastAPI backend and React/Vite dashboard for managing user profiles, versioned resumes, opportunity tracking with a status machine, automated discovery, a multi-stage evaluation funnel (deterministic eligibility filter + scam/risk filter + local embedding relevance scoring), headless browser automation worker, and human-in-the-loop recruiter response center.
 
 ## What's Included
 
 | Layer | Description |
 |---|---|
-| **SQLAlchemy Models** | `profiles` + children, `resumes`, `opportunities`, `status_history`, `applications`, `scoring_verdicts`, `scam_content_signatures` (10 tables total) |
-| **Alembic Migrations** | Four migrations (0001 + 0002 + 0003 + 0004) in a chain; ready for future schema growth |
-| **Repository Layer** | `profile_repo`, `resume_repo`, `opportunity_repo`, `status_history_repo`, `application_repo`, `scoring_repo`, `scam_signature_repo` |
-| **Service Layer** | Profile/resume services + opportunity transition engine + funnel orchestrator + scam review service |
-| **Resume Parser** | Deterministic text extraction from PDF/DOCX via `pypdf`/`python-docx` with fail-closed logic |
-| **Status Machine** | 15-status lifecycle with enforced transition map, audit trail, and idempotency primitives |
-| **Discovery Adapters** | Greenhouse, Lever (stable), RSS feeds (stable), Gmail job alerts (discovery_only) |
+| **SQLAlchemy Models** | `profiles` + children, `resumes`, `opportunities`, `status_history`, `applications`, `scoring_verdicts`, `scam_content_signatures`, `recruiter_messages` (14+ tables total) |
+| **Alembic Migrations** | 9 sequential migrations (0001 through 0009) including status vocabulary normalization |
+| **Repository Layer** | `profile_repo`, `resume_repo`, `opportunity_repo`, `status_history_repo`, `application_repo`, `scoring_repo`, `scam_signature_repo`, `recruiter_message_repo` |
+| **Service Layer** | Profile/resume services + opportunity transition engine + application state machine + funnel orchestrator + scam review + recruiter response loop |
+| **Browser Worker** | Decoupled Playwright browser worker polling application queue via DB interface with zero core dependencies |
+| **Status Machine** | 15-status opportunity lifecycle + 4-status application lifecycle with validated transition maps, audit trail, and status normalization |
+| **V1 Platform Target** | **Unstop** actively supported platform adapter; registry-governed execution |
 | **Multi-Stage Funnel** | 3-stage pipeline: deterministic eligibility -> deterministic scam/risk filter + Gemini for ambiguous -> local relevance |
+| **Response Center** | React dashboard page (`ResponseCenterPage`) for reviewing recruiter communications, editing Gemini reply drafts, and approving Gmail draft creation |
 | **Scheduler** | APScheduler with independent per-source discovery jobs and periodic funnel batch evaluations |
-| **FastAPI API** | CRUD endpoints + discovery status + status transitions + applications + scoring verdicts + scam review |
-| **Test Suite** | 283 pytest tests — repos, parser, status transitions, adapters, pipeline, scheduler, eligibility, relevance, scam rules, gemini client, review API, funnel |
+| **FastAPI API** | REST API with dependency injection, strict validation, and error handling |
+| **Test Suite** | 472+ backend pytest tests (100% pass) + 36 frontend vitest tests (100% pass) |
 
 ## Quick Start
 
@@ -639,7 +644,7 @@ Create Gmail Draft (Drafts only)         —
 
 ### The Hard Invariant: "Any temptation to let it auto-send — resist it."
 
-1. **Restricted Gmail OAuth Permissions**:
+1. **Restricted OAuth Scopes & Application-Level Runtime Guards**:
    The app requests **strictly** the following OAuth scopes:
    - `https://www.googleapis.com/auth/gmail.readonly` (reading alerts & recruiter replies)
    - `https://www.googleapis.com/auth/gmail.compose` (creating drafts in Drafts folder)
@@ -648,7 +653,10 @@ Create Gmail Draft (Drafts only)         —
    - `https://www.googleapis.com/auth/gmail.send` is **never requested**.
    - `https://mail.google.com/` (full access) is **never requested**.
 
-   This turns "you send" from an application-level promise into a permission-level guarantee: even a severe bug in our code cannot send an email on your behalf, because the credentials held by the application lack the structural capability to send messages.
+   *Security Note on `gmail.compose`*: Because the Google Gmail API's `gmail.compose` scope technically permits calling `users.drafts.send`, restricted scopes alone do not physically prevent sending. Therefore, our "drafts only, never auto-send" invariant is structurally enforced by **application-level runtime guards**:
+   - **`GuardedGmailService`**: Intercepts Google API calls and raises `PermissionError("AUTOMATION GUARD: Programmatic email sending is strictly prohibited.")` on any attempted `.send()` call.
+   - **No Send Endpoints**: `draft_service` and API routers expose zero send functions; only `service.users().drafts().create()` is ever invoked.
+   - **Physical Human Boundary**: The candidate must physically log in to Gmail, review the draft, and click "Send".
 
 2. **The Review Action — Two Shapes, One Principle**:
    - **Reply-bearing categories** (`interview_invite`, `screening_question`, `offer`, `follow_up`): Displays the Gemini-drafted reply (prefixed with `[AI SUGGESTED REPLY - EDIT BEFORE SENDING]`) in an editable text area. Clicking **Approve & create draft** creates a draft in your Gmail account via `service.users().drafts().create(...)`. You physically open Gmail and click Send.
@@ -666,7 +674,31 @@ Create Gmail Draft (Drafts only)         —
 | `POST` | `/messages/{id}/approve-reply` | Approve reply (with optional human edits), create Gmail draft, and transition application to `interview_scheduled` or `offer_received` |
 | `POST` | `/messages/{id}/acknowledge` | Acknowledge a non-reply message (e.g. rejection) and transition application to `rejected_by_recruiter` |
 
+## Unstop V1 — U1 Architecture Hardening
 
+Unstop is the sole actively supported platform for the V1 release. The U1 phase establishes a hardened baseline:
 
+### 1. Platform Scope
+- **Active Platform**: `unstop` is set as the sole active platform in `core/config.py` (`ACTIVE_PLATFORMS = ["unstop"]`, `V1_TARGET_PLATFORM = "unstop"`) and `worker/adapters/registry.py`.
+- Other adapters (Greenhouse, Lever, RSS) remain preserved for discovery and architectural continuity, but live application workflows and browser automation validations target Unstop.
 
+### 2. Core ↔ Worker Queue Decoupling
+- **Zero Worker Imports in Core**: Core and API layers have zero dependencies on the Playwright worker package. The worker interacts strictly via database queue records (`Application` rows).
+- Worker runs as an autonomous, independent process polling the queue (`worker.main`).
 
+### 3. Application State Transitions & Status Normalization
+- **Application State Machine**: Transitions are managed exclusively through `core.services.application_service.transition_application_status()`. Direct assignments (`app.status = ...`) are prohibited and guarded by SQLAlchemy ORM validators.
+- **Allowed Application Lifecycle**:
+  - `pending` ➔ `form_filled` or `failed`
+  - `form_filled` ➔ `submitted` or `failed`
+  - `failed` ➔ `pending` (retry)
+  - `submitted` (terminal)
+- **Status Vocabulary Normalization**:
+  - Reconciled duplicate vocabulary: `applied` (canonical, alias `submitted`), `interview_scheduled` (canonical, alias `interview`), `offer_received` (canonical, alias `offered`).
+  - Database migrated cleanly via Alembic migration `0009_normalize_status_vocabulary.py`.
+
+### 4. Response Center Frontend
+- Full human-in-the-loop dashboard page in `frontend/src/pages/ResponseCenterPage.tsx`.
+- Displays recruiter messages with category badges, timestamps, opportunity context, and response actions.
+- Allows editing Gemini-drafted replies and approving them to create Gmail drafts.
+- Allows acknowledging rejections to synchronize application status without drafting emails.

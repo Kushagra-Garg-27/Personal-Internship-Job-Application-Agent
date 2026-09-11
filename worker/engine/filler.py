@@ -18,7 +18,7 @@ from core.models.profile import Profile
 from core.models.resume import Resume
 from core.repositories import profile_repo
 from core.services import application_service, opportunity_service
-from core.status import OpportunityStatus, ReliabilityTier
+from core.status import ApplicationStatus, OpportunityStatus, ReliabilityTier
 from worker.adapters.base import BasePlatformAdapter, FillResult, SubmissionStatus
 from worker.adapters.registry import (
     DiscoveryOnlyRejectionError,
@@ -184,8 +184,13 @@ class ApplicationFiller:
         # 9. Handle outcome fail-closed
         if not fill_result.success or fill_result.status == "manual_required":
             reason = fill_result.error_reason or "Automated form fill failed."
-            app_record.status = "failed"
-            app_record.notes = reason
+            application_service.transition_application_status(
+                session,
+                app_record.id,
+                ApplicationStatus.FAILED,
+                notes=reason,
+                reason=reason,
+            )
             opportunity_service.transition_status(
                 session,
                 opp.id,
@@ -204,8 +209,13 @@ class ApplicationFiller:
             "draft_payload": fill_result.draft_payload,
             "filled_at": datetime.now(timezone.utc).isoformat(),
         }
-        app_record.status = "form_filled"
-        app_record.notes = json.dumps(notes_dict, default=str)
+        application_service.transition_application_status(
+            session,
+            app_record.id,
+            ApplicationStatus.FORM_FILLED,
+            notes=json.dumps(notes_dict, default=str),
+            reason="Application filled by worker; awaiting human review",
+        )
 
         opportunity_service.transition_status(
             session,
@@ -321,8 +331,13 @@ class ApplicationFiller:
             else:
                 # Not confirmed: fail closed to manual application, do NOT blindly retry
                 reason = "Submission timed out ambiguously and was not confirmed by platform. Manual application required."
-                app.status = "failed"
-                app.notes = f"{app.notes}\n[FAILURE]: {reason}"
+                application_service.transition_application_status(
+                    session,
+                    app.id,
+                    ApplicationStatus.FAILED,
+                    notes=f"{app.notes}\n[FAILURE]: {reason}",
+                    reason=reason,
+                )
                 opportunity_service.transition_status(
                     session,
                     opp.id,
@@ -335,8 +350,13 @@ class ApplicationFiller:
 
         if not result.get("success"):
             error_msg = result.get("error") or "Submission failed."
-            app.status = "failed"
-            app.notes = f"{app.notes}\n[ERROR]: {error_msg}"
+            application_service.transition_application_status(
+                session,
+                app.id,
+                ApplicationStatus.FAILED,
+                notes=f"{app.notes}\n[ERROR]: {error_msg}",
+                reason=error_msg,
+            )
             opportunity_service.transition_status(
                 session,
                 opp.id,

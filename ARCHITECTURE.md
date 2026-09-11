@@ -1,9 +1,14 @@
-# Comprehensive Architectural Reconstruction & System Status (Phases 1–10)
+# Comprehensive Architectural Reconstruction & System Status (Phases 1–10 & Unstop V1 Hardening)
 **Project**: Job Application Agent / Career Intelligence Core  
-**Current State**: Post-Phase 10 Implementation & Verification  
-**Repository**: `c:\Users\kusha\OneDrive\Desktop\AI-AGent\job-app-agent`  
-**Database Revision**: Alembic `0008` (Head)  
-**Test Coverage**: 462 Backend Tests (458 test functions, 100% Pass) | 13 Frontend Unit Tests (100% Pass) | Production Build Clean (641ms)
+**Current State**: Unstop V1 Hardening & Architecture Baseline  
+**Repository**: `c:\Projects\job-app-agent`  
+**Database Revision**: Alembic `0009` (Head)  
+**Active Platform Target**: **Unstop is the sole supported platform for V1 validation.**  
+**Test Coverage**: 472+ Backend Tests (100% Pass) | 36 Frontend Unit Tests (100% Pass) | Production Build Clean
+
+> [!IMPORTANT]
+> **Unstop is the sole supported platform for V1 validation.**
+> All active development, browser automation testing, and integration validation in V1 strictly target Unstop. Direct ATS adapters (Greenhouse, Lever) and legacy scrapers remain preserved for architectural continuity but are not expanded.
 
 ---
 
@@ -597,6 +602,7 @@ erDiagram
 - `0006_recruiter_messages.py`: Introduces `recruiter_messages` table for inbox monitoring and classification.
 - `0007_notifications.py`: Adds `notification_logs` and `notification_settings` for Telegram/WhatsApp dispatch.
 - `0008_phase10_response_loop.py`: Adds `suggested_reply`, `action_taken`, and `draft_id` columns to `recruiter_messages`.
+- `0009_normalize_status_vocabulary.py`: Normalizes legacy opportunity statuses to canonical vocabulary (`applied`, `interview_scheduled`, `offer_received`).
 
 ---
 
@@ -607,7 +613,7 @@ erDiagram
 | **Greenhouse API** | Ingest job listings & submit via Direct API | Read/Write (via Worker) | Optional API token | Strict validation against schema | Backoff retry; skips malformed posts |
 | **Lever API** | Ingest job listings & submit via Direct API | Read/Write (via Worker) | Optional API token | Strict validation against schema | Backoff retry; skips malformed posts |
 | **RSS Job Feeds** | Broad discovery from remote/tech feeds | Read-Only | None (Public XML) | Parse timeout limits | Logs warning; ignores corrupted XML |
-| **Gmail API** | Job alert discovery, message monitoring, draft creation | **Draft-Only / Read-Only** | OAuth2 `credentials.json`, `token.json` | **Hard OAuth scope guard**: `gmail.readonly` and `gmail.compose` ONLY. `gmail.send` is strictly forbidden. | Refreshes token; if expired, flags health error and stops polling. |
+| **Gmail API** | Job alert discovery, message monitoring, draft creation | **Draft-Only / Read-Only** | OAuth2 `credentials.json`, `token.json` | **Application Guard Enforcement**: Uses `gmail.readonly` and `gmail.compose`. While `gmail.compose` technically permits sending at the Google API layer, sending is strictly blocked at the application layer via `GuardedGmailService` runtime interception and `draft_service` isolation. Any send attempt raises `SendOperationBlockedError`. | Refreshes token; if expired, flags health error and stops polling. |
 | **Google Gemini API** | Ambiguous scam analysis, question drafting, reply suggestion | Generation Only | `GEMINI_API_KEY` | Hard quota limit (1500 calls/day); output always marked `[AI DRAFT]` or `[AI SUGGESTED REPLY]` | **Fail-closed**: Ambiguous scams marked pending; replies fallback to offline templates. |
 | **Telegram Bot API** | Real-time candidate mobile push alerts | Outbound Notify Only | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Telemetry only; no inbound execution commands | Logs error; records delivery failure in `notification_logs`. |
 | **WhatsApp (Infobip)** | Push alerts via pre-approved templates | Outbound Notify Only | `INFOBIP_API_KEY`, `INFOBIP_BASE_URL` | Template compliance; strictly outbound telemetry | Logs error; records delivery failure in `notification_logs`. |
@@ -866,8 +872,8 @@ flowchart LR
 ```
 
 ### 12.1 Platform Adapter Hierarchy
-- **Tier 1: Stable HTTP (`GreenhouseAdapter`, `LeverAdapter`)**: Assembles standard multipart/form-data payloads from the candidate's profile and resume. Submits via HTTP POST without running a headless browser, achieving maximum speed and zero DOM instability.
-- **Tier 2: Experimental Browser (`InternshalaAdapter`, `UnstopAdapter`)**: Employs Playwright to launch Chromium, load encrypted session cookies, navigate to the portal, map input fields, attach the resume file, and invoke `QuestionDrafter` for open-ended screening questions.
+- **Tier 1: Stable HTTP (`GreenhouseAdapter`, `LeverAdapter`)**: Assembles standard multipart/form-data payloads from the candidate's profile and resume. Submits via HTTP POST without running a headless browser, achieving maximum speed and zero DOM instability. Preserved for continuity.
+- **Tier 2: Experimental Browser (`UnstopAdapter`, `InternshalaAdapter`)**: Employs Playwright to launch Chromium, load encrypted session cookies, navigate to the portal, map input fields, attach the resume file, and invoke `QuestionDrafter` for open-ended screening questions. **Unstop is the sole actively supported platform for V1 validation.**
 - **Tier 3: Discovery-Only**: Used strictly for ingestion (e.g., RSS, general job alerts); forms cannot be submitted.
 
 ### 12.2 Form Fill & Question Drafting
@@ -888,6 +894,8 @@ The following invariants must be maintained across all future phases:
 6. **Fail-Closed Verification**: If an evaluation service (parsing, Gemini, network) fails or runs out of quota, items are marked failed or pending human review—never auto-approved.
 7. **Explicit AI Marking**: All text generated by an LLM for external consumption must carry an explicit visual prefix (`[AI DRAFT]` or `[AI SUGGESTED REPLY]`).
 8. **Notification Isolation**: Notifications are outbound informational telemetry only and cannot accept incoming execution instructions.
+9. **Centralized Application State Transitions**: All mutations to `Application.status` must pass through `transition_application_status()`, enforcing `pending -> form_filled -> submitted` or `failed -> pending`, rejecting invalid transitions, and maintaining atomic transaction integrity.
+10. **Unstop V1 Target Exclusivity**: Unstop is the sole actively supported platform for V1 validation.
 
 ---
 
@@ -896,12 +904,12 @@ The following invariants must be maintained across all future phases:
 | Subsystem | Maturity Level | Evidence / Test Status | Known Gaps / Dependencies |
 |---|---|---|---|
 | **Profile & Resume Engine** | **Production-Ready** | 40 unit tests; handles PDF/DOCX; 50-char fail-closed guard. | Requires local `pypdf` and `docx` libraries. |
-| **Status Machine & Audit** | **Production-Ready** | 52 unit tests; 100% transition coverage; immutable history. | None. Schema supports arbitrary state history. |
+| **Status Machine & Audit** | **Production-Ready** | 62 unit tests; 100% transition coverage; centralized Application machine. | None. Schema supports arbitrary state history. |
 | **Discovery Pipeline** | **Production-Ready** | 63 tests; Greenhouse, Lever, RSS, and Gmail alerts operational. | Gmail alerts require valid Google OAuth2 setup. |
 | **Stage 1: Eligibility** | **Production-Ready** | 22 tests; fast deterministic matching on hard criteria. | Dependent on candidate profile fields being populated. |
 | **Stage 2: Scam/Risk Engine**| **Production-Ready** | 48 tests; deterministic rules + Gemini fallback + quota guard. | Requires `GEMINI_API_KEY` for ambiguous fallback. |
 | **Stage 3: Relevance Scorer**| **Production-Ready** | 12 tests; runs locally via `sentence-transformers`. | First run downloads `all-MiniLM-L6-v2` model weights. |
-| **Dashboard Frontend** | **Production-Ready** | 13 vitest tests; clean Vite build (718ms); React 19 SPA. | Depends on running FastAPI backend on port 8000. |
+| **Dashboard Frontend** | **Production-Ready** | 36 vitest tests; clean Vite build (351ms); React 19 SPA. | Depends on running FastAPI backend on port 8000. |
 | **Recruiter Message Ingestion**| **Production-Ready** | 58 tests; 3-tier linker; rule + LLM classifier. | Requires active Gmail OAuth tokens (`token.json`). |
 | **Notification Subsystem** | **Production-Ready** | 42 tests; Telegram and Infobip WhatsApp providers tested. | Real delivery requires live Bot Token / Infobip Key. |
 | **Browser Automation Worker**| **Production-Ready Core** | 43 worker tests; DOM filler, security storage, registry. | Live DOM execution subject to external website layout changes. |

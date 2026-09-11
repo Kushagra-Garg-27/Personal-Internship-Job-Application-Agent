@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
-import { ResponseCenterPlaceholder } from './ResponseCenterPlaceholder';
+import { ResponseCenterPage, ResponseCenterPlaceholder } from './ResponseCenterPage';
 import { api } from '../api/client';
 import type {
   RecruiterMessage,
@@ -585,5 +585,24 @@ describe('ResponseCenterPlaceholder', () => {
     });
     expect(screen.queryByRole('button', { name: /Acknowledge/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Approve/ })).not.toBeInTheDocument();
+  });
+
+  // ── Refresh behavior ─────────────────────────────────────────────────
+
+  it('refetches messages, stats, and health when the Refresh button is clicked', async () => {
+    render(<ResponseCenterPage />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Response Center')).toBeInTheDocument();
+    });
+
+    const refreshButton = screen.getByRole('button', { name: /Refresh/i });
+    fireEvent.click(refreshButton);
+
+    await waitFor(() => {
+      expect(api.getMessages).toHaveBeenCalledTimes(2);
+      expect(api.getMessageStats).toHaveBeenCalledTimes(2);
+      expect(api.getIntegrationHealth).toHaveBeenCalledTimes(2);
+    });
   });
 });

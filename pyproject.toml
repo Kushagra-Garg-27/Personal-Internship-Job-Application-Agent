@@ -46,3 +46,7 @@ include = ["core*", "api*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+addopts = "-m \"not live_unstop\""
+markers = [
+    "live_unstop: live integration tests that hit the real Unstop website (skipped by default in offline CI)",
+]

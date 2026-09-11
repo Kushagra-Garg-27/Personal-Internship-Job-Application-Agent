@@ -19,6 +19,9 @@ from worker.adapters.unstop import UnstopAdapter
 
 logger = logging.getLogger(__name__)
 
+# Unstop V1: Sole actively supported target platform for V1 validation
+V1_ACTIVE_PLATFORM = "unstop"
+
 
 class DiscoveryOnlyRejectionError(Exception):
     """Raised when an opportunity tagged discovery_only reaches the Worker queue."""

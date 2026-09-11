@@ -18,6 +18,7 @@ from core.discovery.gmail_client import (
     guard_gmail_service,
 )
 from core.messaging.draft_service import create_gmail_draft
+from core.status import ApplicationStatus, OpportunityStatus
 
 
 def test_guard_intercepts_drafts_send():
@@ -113,3 +114,93 @@ def test_create_gmail_draft_auto_guards_raw_service():
     # Confirm no send was called
     mock_service.users().drafts().send.assert_not_called()
     mock_service.users().messages().send.assert_not_called()
+
+
+def test_recruiter_response_handling_only_creates_drafts(db_session):
+    """Verify approve_reply in response_loop_service creates a draft and never calls send."""
+    from core.models.message import RecruiterMessage
+    from core.services import application_service, opportunity_service, response_loop_service
+
+    opp = opportunity_service.create_opportunity(
+        db_session,
+        title="Software Engineer",
+        company="Acme Corp",
+        url="https://unstop.com/jobs/acme",
+    )
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.RECOMMENDED)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.READY_TO_APPLY)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.AWAITING_SUBMISSION)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.APPLIED)
+
+    app = application_service.create_application(
+        db_session,
+        opportunity_id=opp.id,
+        adapter_name="unstop",
+    )
+    application_service.transition_application_status(
+        db_session,
+        app.id,
+        ApplicationStatus.SUBMITTED,
+    )
+    db_session.commit()
+
+    msg = RecruiterMessage(
+        application_id=app.id,
+        gmail_id="gmail_msg_456",
+        sender="recruiter@acme.com",
+        sender_domain="acme.com",
+        subject="Interview Invitation",
+        body_preview="We'd like to interview you",
+        classification="interview_invite",
+        suggested_reply="I would be delighted to interview.",
+    )
+    db_session.add(msg)
+    db_session.commit()
+
+    mock_service = MagicMock()
+    mock_create = MagicMock()
+    mock_create.execute.return_value = {"id": "draft_resp_789"}
+    mock_service.users().drafts().create.return_value = mock_create
+
+    updated_msg, updated_opp = response_loop_service.approve_and_create_draft(
+        db_session,
+        message_id=msg.id,
+        edited_reply="I am excited to confirm my availability.",
+        gmail_service=mock_service,
+    )
+
+    assert updated_msg.draft_id == "draft_resp_789"
+    # Invariant: only drafts().create() is called
+    mock_service.users().drafts().create.assert_called_once()
+    # Invariant: drafts().send() and messages().send() are never called
+    mock_service.users().drafts().send.assert_not_called()
+    mock_service.users().messages().send.assert_not_called()
+
+
+def test_draft_service_interface_has_no_send_functions():
+    """Verify that draft_service exposes only draft creation and no send functions."""
+    import core.messaging.draft_service as ds
+
+    # Check all public callables in draft_service module
+    public_callables = [
+        name for name, val in ds.__dict__.items()
+        if callable(val) and not name.startswith("_")
+    ]
+    assert "create_gmail_draft" in public_callables
+    for name in public_callables:
+        assert "send" not in name.lower(), f"Unexpected send function exposed: {name}"
+
+
+def test_scheduler_and_worker_have_zero_send_calls():
+    """Static analysis test verifying scheduler, poller, and worker never reference send()."""
+    import inspect
+    import core.discovery.scheduler as sched
+    import core.messaging.poller as poller
+    import worker.runner as wrunner
+    import worker.engine.filler as wfiller
+
+    for module in (sched, poller, wrunner, wfiller):
+        source = inspect.getsource(module)
+        assert ".send(" not in source, f"Forbidden .send() found in {module.__name__}"
+        assert ".drafts().send" not in source, f"Forbidden drafts().send in {module.__name__}"
+

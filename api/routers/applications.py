@@ -13,6 +13,7 @@ from core.schemas.opportunity import (
     ApplicationUpdate,
 )
 from core.services import application_service, opportunity_service
+from core.status import InvalidApplicationTransitionError
 
 router = APIRouter(tags=["applications"])
 
@@ -72,14 +73,18 @@ def update_application(
     db: Session = Depends(get_db),
 ):
     """Update an application's status, confirmation ref, etc."""
-    app = application_service.update_application_status(
-        db,
-        application_id,
-        status=body.status,
-        confirmation_ref=body.confirmation_ref,
-        submitted_at=body.submitted_at,
-        notes=body.notes,
-    )
+    try:
+        app = application_service.update_application_status(
+            db,
+            application_id,
+            status=body.status,
+            confirmation_ref=body.confirmation_ref,
+            submitted_at=body.submitted_at,
+            notes=body.notes,
+        )
+    except (InvalidApplicationTransitionError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
     if app is None:
         raise HTTPException(status_code=404, detail="Application not found.")
     db.commit()

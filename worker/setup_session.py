@@ -38,7 +38,7 @@ def setup_platform_session(platform: str, key_override: str | None = None) -> Pa
     target_path = Path(f"worker/storage/{platform}_storage_state.enc")
 
     print("=" * 70)
-    print(f"🔒 Interactive Session Setup: {platform.upper()}")
+    print(f"[SESSION SETUP] Interactive Session Setup: {platform.upper()}")
     print("=" * 70)
     print(f"1. Opening browser to: {url}")
     print("2. Please log into your account manually in the browser window.")
@@ -52,14 +52,14 @@ def setup_platform_session(platform: str, key_override: str | None = None) -> Pa
         page = context.new_page()
         page.goto(url)
 
-        input("\n👉 Press [ENTER] in this terminal once you have successfully logged in... ")
+        input("\n>> Press [ENTER] in this terminal once you have successfully logged in... ")
 
         # Capture storage state
         state_data = context.storage_state()
         browser.close()
 
     saved_path = save_encrypted_storage_state(state_data, target_path, key=key_override)
-    print(f"\n✅ Session captured successfully and encrypted at rest: {saved_path}")
+    print(f"\n[OK] Session captured successfully and encrypted at rest: {saved_path}")
     print("   The worker can now use this encrypted session state for autofill.")
     return saved_path
 

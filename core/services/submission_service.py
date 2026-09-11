@@ -23,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from core.models.opportunity import Application, Opportunity
 from core.services import application_service, opportunity_service
-from core.status import OpportunityStatus, ReliabilityTier
+from core.status import ApplicationStatus, OpportunityStatus, ReliabilityTier
 
 logger = logging.getLogger(__name__)
 
@@ -287,8 +287,13 @@ def confirm_and_submit(
             return {"success": True, "status": "applied", "confirmed_via_check": True}
         else:
             reason = "Submission timed out ambiguously and was not confirmed by platform. Manual application required."
-            app.status = "failed"
-            app.notes = f"{app.notes}\n[FAILURE]: {reason}"
+            application_service.transition_application_status(
+                session,
+                app.id,
+                ApplicationStatus.FAILED,
+                notes=f"{app.notes}\n[FAILURE]: {reason}",
+                reason=reason,
+            )
             opportunity_service.transition_status(
                 session,
                 opp.id,
@@ -301,8 +306,13 @@ def confirm_and_submit(
 
     if not result.get("success"):
         error_msg = result.get("error") or "Submission failed."
-        app.status = "failed"
-        app.notes = f"{app.notes}\n[ERROR]: {error_msg}"
+        application_service.transition_application_status(
+            session,
+            app.id,
+            ApplicationStatus.FAILED,
+            notes=f"{app.notes}\n[ERROR]: {error_msg}",
+            reason=error_msg,
+        )
         opportunity_service.transition_status(
             session,
             opp.id,

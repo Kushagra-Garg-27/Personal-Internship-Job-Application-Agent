@@ -14,7 +14,7 @@ import pytest
 
 from core.models.opportunity import Application, Opportunity
 from core.services import application_service, opportunity_service
-from core.status import OpportunityStatus
+from core.status import ApplicationStatus, OpportunityStatus
 from worker.adapters.greenhouse import GreenhouseAdapter
 from worker.engine.filler import ApplicationFiller
 
@@ -45,8 +45,12 @@ def test_confirm_submit_stable_http_tier(db_session):
             "fields": {"first_name": "Dev"},
         },
     }
-    app.status = "form_filled"
-    app.notes = json.dumps(draft_notes)
+    application_service.transition_application_status(
+        db_session,
+        app.id,
+        ApplicationStatus.FORM_FILLED,
+        notes=json.dumps(draft_notes),
+    )
     db_session.commit()
 
     filler = ApplicationFiller()
@@ -89,8 +93,12 @@ def test_confirm_submit_experimental_browser_tier(db_session):
         opportunity_id=opp.id,
         adapter_name="internshala",
     )
-    app.status = "form_filled"
-    app.notes = json.dumps({"adapter": "internshala", "tier": "experimental"})
+    application_service.transition_application_status(
+        db_session,
+        app.id,
+        ApplicationStatus.FORM_FILLED,
+        notes=json.dumps({"adapter": "internshala", "tier": "experimental"}),
+    )
     db_session.commit()
 
     filler = ApplicationFiller()

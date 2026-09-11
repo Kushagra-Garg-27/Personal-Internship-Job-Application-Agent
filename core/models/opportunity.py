@@ -26,7 +26,12 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship, validates
 
 from core.models.base import Base, TimestampMixin
-from core.status import ALL_STATUSES, ALL_TIERS
+from core.status import (
+    ALL_APPLICATION_STATUSES,
+    ALL_STATUSES,
+    ALL_TIERS,
+    normalize_opportunity_status,
+)
 
 
 class Opportunity(TimestampMixin, Base):
@@ -211,6 +216,16 @@ class Application(TimestampMixin, Base):
     # ── Relationships ─────────────────────────────────────────────────
     opportunity: Mapped[Opportunity] = relationship(back_populates="applications")
     resume: Mapped["Resume"] = relationship(lazy="selectin")  # noqa: F821
+
+    # ── ORM-level validation ──────────────────────────────────────────
+    @validates("status")
+    def _validate_status(self, _key: str, value: str) -> str:
+        str_val = value.value if hasattr(value, "value") else str(value)
+        if str_val not in ALL_APPLICATION_STATUSES:
+            raise ValueError(
+                f"Invalid application status {value!r}. Must be one of: {sorted(ALL_APPLICATION_STATUSES)}"
+            )
+        return str_val
 
     def __repr__(self) -> str:
         return (

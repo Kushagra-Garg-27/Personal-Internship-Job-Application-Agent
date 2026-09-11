@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     WORKER_HEADLESS: bool = False
     WORKER_POLL_INTERVAL: int = 20
 
+    # Unstop V1 scope targeting
+    V1_TARGET_PLATFORM: str = "unstop"
+    ACTIVE_PLATFORMS: list[str] = ["unstop"]
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
