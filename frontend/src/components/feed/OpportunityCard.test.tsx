@@ -125,4 +125,46 @@ describe('OpportunityCard', () => {
     expect(screen.getByText('Ready for Phase 9 Worker')).toBeInTheDocument();
     expect(screen.queryByText('Approve')).not.toBeInTheDocument();
   });
+
+  it('displays awaiting_submission status with Review & Submit button and triggers onReviewSubmit', () => {
+    const onReviewSubmit = vi.fn();
+    const awaitingOpp = {
+      ...mockOpportunity,
+      status: 'awaiting_submission' as const,
+    };
+
+    render(
+      <OpportunityCard
+        opportunity={awaitingOpp}
+        onInspect={vi.fn()}
+        onApprove={vi.fn()}
+        onDismiss={vi.fn()}
+        onReviewSubmit={onReviewSubmit}
+      />
+    );
+
+    expect(screen.getByText('Form Filled by Worker')).toBeInTheDocument();
+    expect(screen.getByText('Review & Submit')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Review & Submit'));
+    expect(onReviewSubmit).toHaveBeenCalledWith(awaitingOpp);
+  });
+
+  it('displays application submitted indicator when status is applied', () => {
+    const appliedOpp = {
+      ...mockOpportunity,
+      status: 'applied' as const,
+    };
+
+    render(
+      <OpportunityCard
+        opportunity={appliedOpp}
+        onInspect={vi.fn()}
+        onApprove={vi.fn()}
+        onDismiss={vi.fn()}
+      />
+    );
+
+    expect(screen.getByText('Application Submitted')).toBeInTheDocument();
+  });
 });

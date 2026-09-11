@@ -12,6 +12,9 @@ import type {
   TestNotificationResponse,
   CandidateProfile,
   CandidateProfileUpdate,
+  ApplicationResponse,
+  ConfirmSubmitRequest,
+  ConfirmSubmitResponse,
 } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
@@ -240,6 +243,21 @@ export const api = {
     return request<TestNotificationResponse>('/notifications/test', {
       method: 'POST',
       body: JSON.stringify({ event_type: eventType }),
+    });
+  },
+
+  // ── Application Attempts & Submission (U4) ──────────────────────────────
+  async listApplications(opportunityId: number): Promise<ApplicationResponse[]> {
+    return request<ApplicationResponse[]>(`/opportunities/${opportunityId}/applications`);
+  },
+
+  async confirmSubmitApplication(
+    applicationId: number,
+    payload: ConfirmSubmitRequest,
+  ): Promise<ConfirmSubmitResponse> {
+    return request<ConfirmSubmitResponse>(`/applications/${applicationId}/confirm-submit`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 };

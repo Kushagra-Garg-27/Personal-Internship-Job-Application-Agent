@@ -6,6 +6,8 @@ import {
   CheckCircle,
   ChevronRight,
   Building,
+  Send,
+  FileText,
 } from 'lucide-react';
 import type { DashboardOpportunityItem } from '../../types';
 import { ReliabilityBadge, ScoreBadge, StatusBadge } from '../common/Badge';
@@ -15,6 +17,7 @@ interface OpportunityCardProps {
   onInspect: (opp: DashboardOpportunityItem) => void;
   onApprove: (opp: DashboardOpportunityItem) => void;
   onDismiss: (opp: DashboardOpportunityItem) => void;
+  onReviewSubmit?: (opp: DashboardOpportunityItem) => void;
 }
 
 export const OpportunityCard: React.FC<OpportunityCardProps> = ({
@@ -22,6 +25,7 @@ export const OpportunityCard: React.FC<OpportunityCardProps> = ({
   onInspect,
   onApprove,
   onDismiss,
+  onReviewSubmit,
 }) => {
   const [isHovered, setIsHovered] = useState(false);
 
@@ -39,6 +43,8 @@ export const OpportunityCard: React.FC<OpportunityCardProps> = ({
 
   const isRecommended = opportunity.status === 'recommended';
   const isReadyToApply = opportunity.status === 'ready_to_apply';
+  const isAwaitingSubmission = opportunity.status === 'awaiting_submission';
+  const isApplied = opportunity.status === 'applied' || opportunity.status === 'submitted';
   const isDismissed = opportunity.status === 'dismissed';
 
   return (
@@ -328,6 +334,80 @@ export const OpportunityCard: React.FC<OpportunityCardProps> = ({
             >
               <CheckCircle size={14} />
               <span>Ready for Phase 9 Worker</span>
+            </div>
+          )}
+
+          {isAwaitingSubmission && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <div
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '6px 12px',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'rgba(56, 189, 248, 0.1)',
+                  border: '1px solid rgba(56, 189, 248, 0.25)',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
+                  color: '#38bdf8',
+                }}
+              >
+                <FileText size={14} />
+                <span>Form Filled by Worker</span>
+              </div>
+
+              {onReviewSubmit && (
+                <button
+                  onClick={() => onReviewSubmit(opportunity)}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '7px 18px',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: '0.82rem',
+                    fontWeight: 600,
+                    color: '#ffffff',
+                    background: 'linear-gradient(135deg, #0284c7, #0369a1)',
+                    border: '1px solid rgba(14, 165, 233, 0.5)',
+                    boxShadow: '0 0 16px rgba(14, 165, 233, 0.25)',
+                    cursor: 'pointer',
+                    transition: 'all var(--transition-fast)',
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.transform = 'translateY(-1px)';
+                    e.currentTarget.style.boxShadow = '0 6px 20px rgba(14, 165, 233, 0.35)';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.transform = 'translateY(0)';
+                    e.currentTarget.style.boxShadow = '0 0 16px rgba(14, 165, 233, 0.25)';
+                  }}
+                >
+                  <Send size={14} />
+                  <span>Review & Submit</span>
+                </button>
+              )}
+            </div>
+          )}
+
+          {isApplied && (
+            <div
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 12px',
+                borderRadius: 'var(--radius-md)',
+                background: 'rgba(16, 185, 129, 0.1)',
+                border: '1px solid rgba(16, 185, 129, 0.25)',
+                fontSize: '0.78rem',
+                fontWeight: 600,
+                color: 'var(--emerald-400)',
+              }}
+            >
+              <CheckCircle size={14} />
+              <span>Application Submitted</span>
             </div>
           )}
 

@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   FileCheck,
   Building,
+  Send,
 } from 'lucide-react';
 import type { DashboardOpportunityItem } from '../../types';
 import { ReliabilityBadge, ScoreBadge, StatusBadge } from '../common/Badge';
@@ -20,6 +21,7 @@ interface OpportunityDetailDrawerProps {
   onClose: () => void;
   onApproveClick: (opp: DashboardOpportunityItem) => void;
   onDismissClick: (opp: DashboardOpportunityItem) => void;
+  onReviewSubmitClick?: (opp: DashboardOpportunityItem) => void;
 }
 
 export const OpportunityDetailDrawer: React.FC<OpportunityDetailDrawerProps> = ({
@@ -28,6 +30,7 @@ export const OpportunityDetailDrawer: React.FC<OpportunityDetailDrawerProps> = (
   onClose,
   onApproveClick,
   onDismissClick,
+  onReviewSubmitClick,
 }) => {
   if (!isOpen || !opportunity) return null;
 
@@ -43,6 +46,7 @@ export const OpportunityDetailDrawer: React.FC<OpportunityDetailDrawerProps> = (
       : null;
 
   const isActionable = opportunity.status === 'recommended';
+  const isAwaitingSubmission = opportunity.status === 'awaiting_submission';
 
   return (
     <div
@@ -469,6 +473,30 @@ export const OpportunityDetailDrawer: React.FC<OpportunityDetailDrawerProps> = (
                   <span>Approve for Application</span>
                 </button>
               </>
+            )}
+
+            {isAwaitingSubmission && (
+              <button
+                onClick={() => onReviewSubmitClick?.(opportunity)}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  padding: '9px 22px',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  color: '#ffffff',
+                  background: 'linear-gradient(135deg, #0284c7, #0369a1)',
+                  border: '1px solid rgba(14, 165, 233, 0.5)',
+                  boxShadow: '0 0 20px rgba(14, 165, 233, 0.3)',
+                  cursor: 'pointer',
+                  transition: 'all var(--transition-fast)',
+                }}
+              >
+                <Send size={15} />
+                <span>Review & Submit</span>
+              </button>
             )}
 
             {!isActionable && (

@@ -170,6 +170,30 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, className = ''
       bg: 'rgba(249, 115, 22, 0.16)',
       border: 'rgba(249, 115, 22, 0.35)',
     },
+    awaiting_submission: {
+      label: 'Awaiting Submission',
+      color: '#38bdf8',
+      bg: 'rgba(56, 189, 248, 0.16)',
+      border: 'rgba(56, 189, 248, 0.35)',
+    },
+    manual_application_required: {
+      label: 'Manual Required',
+      color: '#fb923c',
+      bg: 'rgba(251, 146, 60, 0.16)',
+      border: 'rgba(251, 146, 60, 0.35)',
+    },
+    applied: {
+      label: 'Applied',
+      color: 'var(--emerald-400)',
+      bg: 'rgba(16, 185, 129, 0.16)',
+      border: 'rgba(16, 185, 129, 0.35)',
+    },
+    submitted: {
+      label: 'Submitted',
+      color: 'var(--emerald-400)',
+      bg: 'rgba(16, 185, 129, 0.16)',
+      border: 'rgba(16, 185, 129, 0.35)',
+    },
     dismissed: {
       label: 'Dismissed',
       color: 'var(--text-tertiary)',

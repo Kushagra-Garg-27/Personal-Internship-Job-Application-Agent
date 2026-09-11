@@ -8,6 +8,8 @@ export type OpportunityStatus =
   | 'recommended'
   | 'rejected_by_user'
   | 'ready_to_apply'
+  | 'awaiting_submission'
+  | 'manual_application_required'
   | 'applied'
   | 'submitted'
   | 'interview'
@@ -269,5 +271,62 @@ export interface TestNotificationResponse {
     retries: number;
   }>;
   channel_degraded_alert_sent: boolean;
+}
+
+// ── U4 Human Submission Review & Confirmation Gate ─────────────────────────
+
+export const HUMAN_SUBMISSION_APPROVAL_TOKEN = 'HUMAN_CONFIRMED_SUBMIT';
+
+export type ApplicationStatus = 'pending' | 'form_filled' | 'submitted' | 'failed';
+
+export interface ApplicationCustomAnswer {
+  question_id?: string | null;
+  question_text?: string;
+  label?: string;
+  answer?: string;
+  is_ai_draft?: boolean;
+}
+
+export interface ApplicationNotesData {
+  adapter?: string;
+  tier?: string;
+  custom_answers?: ApplicationCustomAnswer[];
+  draft_payload?: Record<string, any> | null;
+  filled_at?: string;
+  [key: string]: any;
+}
+
+export interface ApplicationResponse {
+  id: number;
+  opportunity_id: number;
+  resume_id?: number | null;
+  attempt_number: number;
+  status: ApplicationStatus;
+  submitted_at?: string | null;
+  confirmation_ref?: string | null;
+  adapter_name?: string | null;
+  notes?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConfirmSubmitRequest {
+  approval_token: string;
+  approved_by?: string;
+  platform_confirmed?: boolean;
+  confirmation_ref?: string | null;
+  confirmation_detail?: string | null;
+}
+
+export interface ConfirmSubmitResponse {
+  success: boolean;
+  status?: string;
+  confirmed?: boolean;
+  confirmation_ref?: string | null;
+  confirmation_detail?: string | null;
+  submitted_at?: string | null;
+  mode?: string;
+  reason?: string;
+  error?: string;
 }
 

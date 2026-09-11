@@ -11,6 +11,7 @@ import { api } from '../api/client';
 import { OpportunityCard } from '../components/feed/OpportunityCard';
 import { OpportunityDetailDrawer } from '../components/feed/OpportunityDetailDrawer';
 import { ApprovalModal } from '../components/feed/ApprovalModal';
+import { SubmissionReviewModal } from '../components/feed/SubmissionReviewModal';
 
 export const FeedPage: React.FC = () => {
   const [opportunities, setOpportunities] = useState<DashboardOpportunityItem[]>([]);
@@ -23,6 +24,7 @@ export const FeedPage: React.FC = () => {
   // Modals & Drawer State
   const [selectedForDrawer, setSelectedForDrawer] = useState<DashboardOpportunityItem | null>(null);
   const [selectedForApproval, setSelectedForApproval] = useState<DashboardOpportunityItem | null>(null);
+  const [selectedForSubmissionReview, setSelectedForSubmissionReview] = useState<DashboardOpportunityItem | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const fetchFeed = useCallback(async () => {
@@ -88,6 +90,24 @@ export const FeedPage: React.FC = () => {
     // Also update drawer if viewing this item
     if (selectedForDrawer && selectedForDrawer.id === selectedForApproval?.id) {
       setSelectedForDrawer((prev) => (prev ? { ...prev, status: 'ready_to_apply' } : null));
+    }
+  };
+
+  // Handle final submission confirmation success (U4)
+  const handleSubmissionSuccess = (_updatedData: any) => {
+    showToast(`Application successfully confirmed and submitted for "${selectedForSubmissionReview?.title}"!`);
+    setOpportunities((prev) =>
+      prev.map((item) =>
+        item.id === selectedForSubmissionReview?.id
+          ? {
+              ...item,
+              status: 'applied',
+            }
+          : item
+      )
+    );
+    if (selectedForDrawer && selectedForDrawer.id === selectedForSubmissionReview?.id) {
+      setSelectedForDrawer((prev) => (prev ? { ...prev, status: 'applied' } : null));
     }
   };
 
@@ -259,6 +279,8 @@ export const FeedPage: React.FC = () => {
             {[
               { key: 'recommended', label: 'Recommended' },
               { key: 'ready_to_apply', label: 'Ready to Apply' },
+              { key: 'awaiting_submission', label: 'Awaiting Submission' },
+              { key: 'applied', label: 'Applied' },
               { key: 'dismissed', label: 'Dismissed' },
               { key: 'all', label: 'All Statuses' },
             ].map((tab) => (
@@ -376,6 +398,7 @@ export const FeedPage: React.FC = () => {
               onInspect={(item) => setSelectedForDrawer(item)}
               onApprove={(item) => setSelectedForApproval(item)}
               onDismiss={(item) => handleDismiss(item)}
+              onReviewSubmit={(item) => setSelectedForSubmissionReview(item)}
             />
           ))}
         </div>
@@ -393,6 +416,10 @@ export const FeedPage: React.FC = () => {
         onDismissClick={(item) => {
           handleDismiss(item);
         }}
+        onReviewSubmitClick={(item) => {
+          setSelectedForDrawer(null);
+          setSelectedForSubmissionReview(item);
+        }}
       />
 
       {/* ── Final Approval Modal (Resume selector) ────────────────────── */}
@@ -401,6 +428,14 @@ export const FeedPage: React.FC = () => {
         isOpen={Boolean(selectedForApproval)}
         onClose={() => setSelectedForApproval(null)}
         onApproved={handleApprovalSuccess}
+      />
+
+      {/* ── Final Submission Review & Confirmation Modal (U4) ────────── */}
+      <SubmissionReviewModal
+        opportunity={selectedForSubmissionReview}
+        isOpen={Boolean(selectedForSubmissionReview)}
+        onClose={() => setSelectedForSubmissionReview(null)}
+        onSubmitted={handleSubmissionSuccess}
       />
     </div>
   );
