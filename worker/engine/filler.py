@@ -86,13 +86,20 @@ def serialize_profile(profile: Profile | None) -> dict[str, Any]:
 class ApplicationFiller:
     """Orchestrates the filling of approved opportunities."""
 
-    def __init__(self, question_drafter: QuestionDrafter | None = None) -> None:
+    def __init__(
+        self,
+        question_drafter: QuestionDrafter | None = None,
+        adapter_override: BasePlatformAdapter | None = None,
+    ) -> None:
         self.question_drafter = question_drafter or QuestionDrafter()
+        self.adapter_override = adapter_override
 
     def process_opportunity(
         self,
         session: Session,
         opportunity_id: int,
+        *,
+        screenshot_path: Path | str | None = None,
     ) -> dict[str, Any]:
         """Process an approved opportunity in ready_to_apply status."""
         opp = session.get(Opportunity, opportunity_id)
@@ -143,19 +150,22 @@ class ApplicationFiller:
                     break
 
         # 4. Resolve adapter
-        try:
-            adapter = resolve_adapter(opp)
-        except (DiscoveryOnlyRejectionError, UnsupportedPlatformError) as exc:
-            reason = str(exc)
-            opportunity_service.transition_status(
-                session,
-                opp.id,
-                OpportunityStatus.MANUAL_APPLICATION_REQUIRED,
-                reason=reason,
-                actor="worker",
-            )
-            session.commit()
-            return {"status": "manual_required", "reason": reason}
+        if self.adapter_override is not None:
+            adapter = self.adapter_override
+        else:
+            try:
+                adapter = resolve_adapter(opp)
+            except (DiscoveryOnlyRejectionError, UnsupportedPlatformError) as exc:
+                reason = str(exc)
+                opportunity_service.transition_status(
+                    session,
+                    opp.id,
+                    OpportunityStatus.MANUAL_APPLICATION_REQUIRED,
+                    reason=reason,
+                    actor="worker",
+                )
+                session.commit()
+                return {"status": "manual_required", "reason": reason}
 
         # 4b. Resume availability gate (browser-tier adapters upload the file
         # directly).  A missing or unreadable resume must fail closed as
@@ -219,6 +229,28 @@ class ApplicationFiller:
             custom_answers=custom_answers,
         )
 
+        # Post-fill DOM and screenshot diagnostics
+        captured_screenshot: str | None = None
+        remaining_invalids: int = 0
+        final_url: str | None = None
+        page = getattr(app_ctx, "browser_page", None)
+        if page is not None:
+            try:
+                final_url = getattr(page, "url", None)
+                if hasattr(page, "locator"):
+                    remaining_invalids = page.locator(".ng-invalid:not(form)").count()
+            except Exception:
+                pass
+            if screenshot_path:
+                try:
+                    p = Path(screenshot_path)
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    if hasattr(page, "screenshot"):
+                        page.screenshot(path=str(p), full_page=True)
+                        captured_screenshot = str(p)
+                except Exception as s_exc:
+                    logger.warning("Failed to capture screenshot: %s", s_exc)
+
         # 9. Handle outcome fail-closed
         if not fill_result.success or fill_result.status == "manual_required":
             reason = fill_result.error_reason or "Automated form fill failed."
@@ -237,7 +269,14 @@ class ApplicationFiller:
                 actor="worker",
             )
             session.commit()
-            return {"status": "manual_required", "reason": reason}
+            return {
+                "status": "manual_required",
+                "reason": reason,
+                "screenshot_path": captured_screenshot,
+                "remaining_invalids": remaining_invalids,
+                "final_url": final_url,
+                "app_ctx": app_ctx,
+            }
 
         # Success: form filled, awaiting human submission
         notes_dict = {
@@ -271,6 +310,11 @@ class ApplicationFiller:
             "adapter": adapter.adapter_name,
             "tier": adapter.tier.value,
             "custom_answers_count": len(fill_result.custom_answers),
+            "fill_result": fill_result,
+            "screenshot_path": captured_screenshot,
+            "remaining_invalids": remaining_invalids,
+            "final_url": final_url,
+            "app_ctx": app_ctx,
         }
 
     def confirm_and_submit(

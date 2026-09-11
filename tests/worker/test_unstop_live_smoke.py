@@ -299,7 +299,8 @@ class TestLiveUnstopFillSmoke:
             assert page.url == self.TARGET_REGISTER_URL
 
             # Capture evidence screenshot
-            screenshot_path = "C:/Users/kusha/.gemini/antigravity-ide/brain/ccab317c-7398-4b6b-b23b-9d8920437c86/scratch/live_unstop_presubmit_boundary_evidence.png"
+            screenshot_path = "artifacts/u6_dry_run/live_smoke_screenshot.png"
+            Path(screenshot_path).parent.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=screenshot_path, full_page=True)
             print(f"[SCREENSHOT SAVED]: {screenshot_path}")
 

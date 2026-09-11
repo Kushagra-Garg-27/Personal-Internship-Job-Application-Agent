@@ -49,3 +49,6 @@ worker/storage/*.key
 worker/storage/decrypted_*
 worker/storage/*_storage_state.enc
 !worker/storage/.gitkeep
+
+# Runtime validation artifacts (screenshots, evidence logs)
+artifacts/

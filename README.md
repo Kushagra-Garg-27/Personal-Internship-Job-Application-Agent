@@ -610,7 +610,26 @@ To capture and encrypt your active session for experimental platforms:
 
 On any non-valid status, the Worker strictly fails closed to `MANUAL_APPLICATION_REQUIRED` without attempting form filling or submitting.
 
-#### 2. Running the Worker
+#### 2. Controlled Live Dry-Run Validation (Milestone U6)
+To execute a controlled live form-fill validation against real Unstop opportunities up to the review boundary:
+```bash
+# Dry run for a specific active Unstop listing URL
+.venv\Scripts\python -m worker.dry_run --url "https://unstop.com/jobs/<opportunity-seo-url>"
+
+# Or dry run for an existing database opportunity ID
+.venv\Scripts\python -m worker.dry_run --opportunity-id 123
+
+# Options:
+#   --keep-open     Keep browser open after autofill for manual visual review
+#   --headless      Run Chromium headlessly (default: visible browser)
+#   --artifacts-dir Output directory (default: artifacts/u6_dry_run/)
+```
+
+> [!IMPORTANT]
+> **STRICT SAFETY BOUNDARY**: U6 is strictly **fill-only**. The dry-run runner fills the form in the visible Chromium window, attaches the candidate resume, populates AI drafts, captures evidence to `artifacts/u6_dry_run/`, and stops at `ready_for_review` / `awaiting_submission`.
+> It **NEVER** clicks final submit controls, never calls `confirm-submit`, and never transitions to `applied` or `submitted`. The candidate retains complete control over final submission.
+
+#### 3. Running the Worker
 ```bash
 # Foreground daemon polling every 20 seconds
 .venv\Scripts\python -m worker.main --interval 20
