@@ -37,22 +37,131 @@ DEFAULT_SESSION_FILE = Path("worker/storage/unstop_storage_state.enc")
 
 
 class AuthState(str):
-    """Case-insensitive auth state string."""
+    """Case-insensitive auth state string with backward-compatibility aliases."""
+
+    _ALIASES: dict[str, set[str]] = {
+        "VALID": {"VALID", "AUTHENTICATED"},
+        "AUTHENTICATED": {"VALID", "AUTHENTICATED"},
+        "EXPIRED": {"EXPIRED", "SESSION_EXPIRED"},
+        "SESSION_EXPIRED": {"EXPIRED", "SESSION_EXPIRED"},
+        "MISSING": {"MISSING", "SESSION_MISSING"},
+        "SESSION_MISSING": {"MISSING", "SESSION_MISSING"},
+        "INVALID": {"INVALID", "SESSION_CORRUPTED", "CORRUPTED"},
+        "SESSION_CORRUPTED": {"INVALID", "SESSION_CORRUPTED", "CORRUPTED"},
+        "CHECK_FAILED": {"CHECK_FAILED", "NETWORK_ERROR", "FAILED"},
+        "UNKNOWN_AUTH_STATE": {"UNKNOWN_AUTH_STATE", "UNKNOWN"},
+    }
 
     def __eq__(self, other: Any) -> bool:
         if isinstance(other, str):
-            return self.lower() == other.lower()
+            my_upper = self.upper()
+            other_upper = other.upper()
+            if my_upper == other_upper:
+                return True
+            aliases = self._ALIASES.get(my_upper, {my_upper})
+            return other_upper in aliases
         return super().__eq__(other)
 
     def __hash__(self) -> int:
-        return hash(self.lower())
+        return hash(self.upper())
 
 
-AUTHENTICATED = AuthState("AUTHENTICATED")
-SESSION_MISSING = AuthState("SESSION_MISSING")
-SESSION_EXPIRED = AuthState("SESSION_EXPIRED")
-SESSION_CORRUPTED = AuthState("SESSION_CORRUPTED")
+# Explicit outcome constants (U5)
+VALID = AuthState("AUTHENTICATED")
+EXPIRED = AuthState("SESSION_EXPIRED")
+MISSING = AuthState("SESSION_MISSING")
+INVALID = AuthState("SESSION_CORRUPTED")
+CHECK_FAILED = AuthState("CHECK_FAILED")
 UNKNOWN_AUTH_STATE = AuthState("UNKNOWN_AUTH_STATE")
+
+# Backward-compatibility aliases
+AUTHENTICATED = VALID
+SESSION_MISSING = MISSING
+SESSION_EXPIRED = EXPIRED
+SESSION_CORRUPTED = INVALID
+
+SESSION_REMEDIATION_GUIDE: dict[str, str] = {
+    "MISSING": "Unstop session state file not found. Run 'python -m worker.setup_session --platform unstop' to authenticate.",
+    "EXPIRED": "Unstop session has expired or was revoked. Run 'python -m worker.setup_session --platform unstop' to re-authenticate.",
+    "INVALID": "Unstop session state file is corrupted or decryption failed. Run 'python -m worker.setup_session --platform unstop' to generate a fresh session.",
+    "CHECK_FAILED": "Unstop session verification check could not reach or verify with the platform. Check network connectivity or re-authenticate.",
+}
+
+
+def probe_authenticated_endpoint(
+    cookies: list[dict[str, Any]],
+    endpoint_url: str = "https://unstop.com/api/profile",
+    timeout: float = 10.0,
+) -> tuple[bool, AuthState, str]:
+    """Perform a read-only probe against an authenticated Unstop endpoint.
+
+    Never exposes cookies, tokens, or credentials in returned detail or logs.
+    """
+    import urllib.error
+    import urllib.request
+
+    unstop_cookies = [
+        f"{c['name']}={c['value']}"
+        for c in cookies
+        if "unstop.com" in c.get("domain", "") and c.get("name") and c.get("value")
+    ]
+    if not unstop_cookies:
+        return False, EXPIRED, "No valid Unstop cookies available to probe."
+
+    cookie_header = "; ".join(unstop_cookies)
+
+    class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirectHandler)
+    req = urllib.request.Request(
+        endpoint_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Cookie": cookie_header,
+        },
+    )
+
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            final_url = resp.geturl() or ""
+            if "auth/login" in final_url or "/login" in final_url:
+                return False, EXPIRED, "Platform redirected probe to login (session unauthenticated/expired)."
+            if resp.status == 200:
+                return True, VALID, "Authenticated session verified by platform endpoint."
+            return False, EXPIRED, f"Platform returned status {resp.status} for session probe."
+
+    except urllib.error.HTTPError as exc:
+        if exc.code in (301, 302, 303, 307, 308):
+            loc = exc.headers.get("Location") or ""
+            if "login" in loc or "auth" in loc:
+                return False, EXPIRED, "Platform redirected probe to login page (session expired)."
+            return False, EXPIRED, "Session redirected to unauthenticated destination."
+
+        if exc.code in (401, 403):
+            body_preview = ""
+            try:
+                body_preview = exc.read().decode("utf-8", errors="ignore")[:300].lower()
+            except Exception:
+                pass
+            if "challenge" in body_preview or "cloudflare" in body_preview:
+                return False, CHECK_FAILED, "Platform presented bot verification challenge during session probe."
+            return False, EXPIRED, f"Platform rejected session credentials (HTTP {exc.code})."
+
+        if exc.code >= 500:
+            return False, CHECK_FAILED, f"Platform server error (HTTP {exc.code}) during session probe."
+
+        return False, CHECK_FAILED, f"Unexpected HTTP response {exc.code} during session probe."
+
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return False, CHECK_FAILED, f"Network communication failure during session probe: {type(exc).__name__}"
+    except Exception as exc:
+        return False, CHECK_FAILED, f"Session check failed unexpectedly: {type(exc).__name__}"
 
 
 class QuestionClassification(str, Enum):
@@ -84,7 +193,7 @@ class SessionStatus:
     """Authentication and session state for Unstop adapter."""
 
     valid: bool
-    status: AuthState | str  # AUTHENTICATED, SESSION_MISSING, SESSION_EXPIRED, SESSION_CORRUPTED, UNKNOWN_AUTH_STATE
+    status: AuthState | str  # VALID, EXPIRED, MISSING, INVALID, CHECK_FAILED
     detail: str | None = None
     username: str | None = None
     cookies_count: int = 0
@@ -105,34 +214,42 @@ class UnstopAdapter(BasePlatformAdapter):
         encryption_key: str | bytes | None = None,
         headless: bool | None = None,
         playwright_instance: Any = None,
+        probe_network: bool = False,
     ) -> None:
         self.session_file = Path(session_file or DEFAULT_SESSION_FILE)
         self.encryption_key = encryption_key
         self.headless = headless if headless is not None else settings.WORKER_HEADLESS
         self._pw = playwright_instance
+        self.probe_network = probe_network
 
-    def check_session_status(self) -> SessionStatus:
+    def check_session_status(
+        self,
+        probe_network: bool | None = None,
+        timeout: float = 10.0,
+    ) -> SessionStatus:
         """Check whether local encrypted session state is available and contains valid cookies."""
+        should_probe = self.probe_network if probe_network is None else probe_network
+
         if not self.session_file.exists():
             return SessionStatus(
                 valid=False,
-                status=SESSION_MISSING,
-                detail=f"Unstop session state file not found at {self.session_file}. Run 'python -m worker.setup_session --platform unstop'.",
+                status=MISSING,
+                detail=f"{SESSION_REMEDIATION_GUIDE['MISSING']} (path={self.session_file})",
             )
         try:
             storage_state = load_decrypted_storage_state(self.session_file, key=self.encryption_key)
         except Exception as exc:
             return SessionStatus(
                 valid=False,
-                status=SESSION_CORRUPTED,
-                detail=f"Failed to decrypt or load session state: {exc}",
+                status=INVALID,
+                detail=f"Failed to decrypt or load session state: {exc}. {SESSION_REMEDIATION_GUIDE['INVALID']}",
             )
 
         if not isinstance(storage_state, dict):
             return SessionStatus(
                 valid=False,
-                status=SESSION_CORRUPTED,
-                detail="Decrypted storage state is not a valid JSON dictionary.",
+                status=INVALID,
+                detail=f"Decrypted storage state is not a valid JSON dictionary. {SESSION_REMEDIATION_GUIDE['INVALID']}",
             )
 
         cookies = storage_state.get("cookies", []) if isinstance(storage_state, dict) else []
@@ -140,8 +257,8 @@ class UnstopAdapter(BasePlatformAdapter):
         if not unstop_cookies:
             return SessionStatus(
                 valid=False,
-                status=SESSION_EXPIRED,
-                detail="No Unstop cookies found in session state.",
+                status=EXPIRED,
+                detail=f"No Unstop cookies found in session state. {SESSION_REMEDIATION_GUIDE['EXPIRED']}",
                 cookies_count=0,
             )
 
@@ -154,14 +271,26 @@ class UnstopAdapter(BasePlatformAdapter):
         if not valid_unstop_cookies:
             return SessionStatus(
                 valid=False,
-                status=SESSION_EXPIRED,
-                detail="All Unstop cookies in session state have expired.",
+                status=EXPIRED,
+                detail=f"All Unstop cookies in session state have expired. {SESSION_REMEDIATION_GUIDE['EXPIRED']}",
                 cookies_count=len(unstop_cookies),
+            )
+
+        # Optional live endpoint verification probe
+        if should_probe:
+            is_valid, probe_status, probe_detail = probe_authenticated_endpoint(
+                unstop_cookies, timeout=timeout
+            )
+            return SessionStatus(
+                valid=is_valid,
+                status=probe_status,
+                detail=probe_detail,
+                cookies_count=len(valid_unstop_cookies),
             )
 
         return SessionStatus(
             valid=True,
-            status=AUTHENTICATED,
+            status=VALID,
             detail=f"Found {len(valid_unstop_cookies)} valid Unstop cookies in encrypted session.",
             cookies_count=len(valid_unstop_cookies),
         )
@@ -418,15 +547,30 @@ class UnstopAdapter(BasePlatformAdapter):
         opportunity_id = kwargs.get("opportunity_id", 0)
         extracted = self.extract({"url": url, "opportunity_id": opportunity_id})
 
-        if not self.session_file.exists():
-            logger.warning("Unstop session state not found at %s", self.session_file)
+        session_stat = self.check_session_status(probe_network=False)
+        if not session_stat.valid:
+            meta: dict[str, Any] = {
+                "session_valid": False,
+                "session_status": str(session_stat.status),
+                "session_detail": session_stat.detail,
+            }
+            if session_stat.status == MISSING:
+                meta["session_missing"] = True
+            elif session_stat.status == EXPIRED:
+                meta["session_expired"] = True
+            elif session_stat.status == INVALID:
+                meta["session_invalid"] = True
+            elif session_stat.status == CHECK_FAILED:
+                meta["session_check_failed"] = True
+
+            logger.warning("Cannot open Unstop application: %s", session_stat.detail)
             return ApplicationContext(
                 opportunity_id=opportunity_id,
                 listing_url=url,
                 adapter_name=self.adapter_name,
                 tier=self.tier,
                 extracted=extracted,
-                metadata={"session_missing": True},
+                metadata=meta,
             )
 
         try:
@@ -454,7 +598,7 @@ class UnstopAdapter(BasePlatformAdapter):
                     extracted=extracted,
                     browser_context=context,
                     browser_page=page,
-                    metadata={"session_expired": True},
+                    metadata={"session_expired": True, "session_status": str(EXPIRED)},
                 )
 
             return ApplicationContext(
@@ -796,13 +940,25 @@ class UnstopAdapter(BasePlatformAdapter):
             return FillResult(
                 success=False,
                 status="manual_required",
-                error_reason="Unstop session state missing. Run python -m worker.setup_session --platform unstop",
+                error_reason=app_ctx.metadata.get("session_detail") or "Unstop session state missing. Run python -m worker.setup_session --platform unstop",
             )
         if app_ctx.metadata.get("session_expired"):
             return FillResult(
                 success=False,
                 status="manual_required",
-                error_reason="Unstop session expired. Please re-authenticate.",
+                error_reason=app_ctx.metadata.get("session_detail") or "Unstop session expired. Please re-authenticate.",
+            )
+        if app_ctx.metadata.get("session_invalid"):
+            return FillResult(
+                success=False,
+                status="manual_required",
+                error_reason=app_ctx.metadata.get("session_detail") or SESSION_REMEDIATION_GUIDE["INVALID"],
+            )
+        if app_ctx.metadata.get("session_check_failed"):
+            return FillResult(
+                success=False,
+                status="manual_required",
+                error_reason=app_ctx.metadata.get("session_detail") or SESSION_REMEDIATION_GUIDE["CHECK_FAILED"],
             )
         if app_ctx.metadata.get("error"):
             return FillResult(

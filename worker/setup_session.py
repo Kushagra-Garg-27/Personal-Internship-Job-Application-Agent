@@ -19,8 +19,17 @@ PLATFORM_LOGIN_URLS = {
 }
 
 
-def setup_platform_session(platform: str, key_override: str | None = None) -> Path:
-    """Interactively log into a platform and save encrypted session state."""
+def setup_platform_session(
+    platform: str,
+    key_override: str | None = None,
+    *,
+    headless: bool = False,
+    input_fn: Any = input,
+    playwright_instance: Any = None,
+    target_path_override: Path | None = None,
+    probe_network: bool = True,
+) -> Path:
+    """Interactively log into a platform, verify authenticated state, and save encrypted session state."""
     platform = platform.lower().strip()
     if platform not in PLATFORM_LOGIN_URLS:
         raise ValueError(
@@ -35,7 +44,7 @@ def setup_platform_session(platform: str, key_override: str | None = None) -> Pa
         sys.exit(1)
 
     url = PLATFORM_LOGIN_URLS[platform]
-    target_path = Path(f"worker/storage/{platform}_storage_state.enc")
+    target_path = target_path_override or Path(f"worker/storage/{platform}_storage_state.enc")
 
     print("=" * 70)
     print(f"[SESSION SETUP] Interactive Session Setup: {platform.upper()}")
@@ -46,21 +55,63 @@ def setup_platform_session(platform: str, key_override: str | None = None) -> Pa
     print("3. Once logged in and viewing your dashboard/feed, return here.")
     print("=" * 70)
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context()
-        page = context.new_page()
-        page.goto(url)
+    def _execute_session_capture(p):
+        browser = p.chromium.launch(headless=headless)
+        try:
+            context = browser.new_context()
+            page = context.new_page()
+            page.goto(url)
 
-        input("\n>> Press [ENTER] in this terminal once you have successfully logged in... ")
+            # Wait for human interactive login
+            input_fn("\n>> Press [ENTER] in this terminal once you have successfully logged in... ")
 
-        # Capture storage state
-        state_data = context.storage_state()
-        browser.close()
+            # Pre-save verification: check that browser has navigated away from login page
+            current_url = page.url or ""
+            if "auth/login" in current_url or current_url.rstrip("/").endswith("/login"):
+                raise RuntimeError(
+                    f"Authentication verification failed: browser is still on login page ({current_url}). "
+                    "Session was NOT saved. Please re-run setup and complete login."
+                )
+
+            # Extract storage state
+            state_data = context.storage_state()
+            cookies = state_data.get("cookies", [])
+
+            # Domain check
+            expected_domain = "unstop.com" if platform == "unstop" else f"{platform}.com"
+            platform_cookies = [c for c in cookies if expected_domain in c.get("domain", "")]
+            if not platform_cookies:
+                raise RuntimeError(
+                    f"Authentication verification failed: no {platform} cookies captured. "
+                    "Session was NOT saved. Please ensure you are fully logged in before continuing."
+                )
+
+            # Optional live probe for Unstop
+            if platform == "unstop" and probe_network:
+                from worker.adapters.unstop import probe_authenticated_endpoint
+                is_valid, probe_status, probe_detail = probe_authenticated_endpoint(
+                    platform_cookies, timeout=10.0
+                )
+                if not is_valid:
+                    raise RuntimeError(
+                        f"Authentication verification probe failed ({probe_status}): {probe_detail}. "
+                        "Session was NOT saved."
+                    )
+
+            return state_data
+        finally:
+            browser.close()
+
+    if playwright_instance is not None:
+        state_data = _execute_session_capture(playwright_instance)
+    else:
+        with sync_playwright() as p:
+            state_data = _execute_session_capture(p)
 
     saved_path = save_encrypted_storage_state(state_data, target_path, key=key_override)
-    print(f"\n[OK] Session captured successfully and encrypted at rest: {saved_path}")
-    print("   The worker can now use this encrypted session state for autofill.")
+    print(f"\n[OK] Session verified and encrypted at rest: {saved_path}")
+    print(f"     Target platform: {platform.upper()}")
+    print("     The worker can now use this encrypted session state for autofill.")
     return saved_path
 
 

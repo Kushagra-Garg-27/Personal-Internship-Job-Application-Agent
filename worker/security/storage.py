@@ -89,8 +89,11 @@ def decrypt_storage_state(
     fernet = Fernet(get_encryption_key(key))
     try:
         decrypted = fernet.decrypt(encrypted_bytes)
-        return json.loads(decrypted.decode("utf-8"))
-    except InvalidToken as exc:
+        parsed = json.loads(decrypted.decode("utf-8"))
+        if not isinstance(parsed, dict):
+            raise ValueError("Decrypted storage state is not a valid dictionary structure.")
+        return parsed
+    except (InvalidToken, json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError("Invalid storage state decryption key or corrupted ciphertext.") from exc
 
 

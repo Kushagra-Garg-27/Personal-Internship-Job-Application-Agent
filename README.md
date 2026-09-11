@@ -582,16 +582,33 @@ Opportunities Table (ready_to_apply) ──► Worker Poller (worker/runner.py)
 
 ### Worker Commands & Session Setup
 
-#### 1. Interactive Session Setup (One-Time Login)
+#### 1. Interactive Session Setup & Health Lifecycle (Milestone U5)
 To capture and encrypt your active session for experimental platforms:
 ```bash
 # Internshala
 .venv\Scripts\python -m worker.setup_session --platform internshala
 
-# Unstop
+# Unstop (Primary V1 Platform)
 .venv\Scripts\python -m worker.setup_session --platform unstop
 ```
-This opens a visible browser window, allows you to log in manually, captures session state upon pressing `[ENTER]`, and encrypts it at rest without storing passwords.
+**Interactive Model & Verification**:
+1. Launches a visible browser window to the platform login page.
+2. The user authenticates manually in the browser (the agent never asks for, accepts, or stores passwords).
+3. Upon pressing `[ENTER]`, the setup CLI verifies:
+   - The browser has navigated away from the login page.
+   - Platform session cookies are present and valid.
+   - For Unstop, a read-only probe against the platform endpoint confirms the authenticated session.
+4. If verified, the session state is encrypted at rest using Fernet (AES-128-CBC + HMAC-SHA256) into `worker/storage/<platform>_storage_state.enc`.
+5. The browser safely closes without exposing tokens in the console or logs.
+
+**Session Health Statuses**:
+- `VALID` (`valid=True`): Session state decrypted, unexpired cookies present, and online probe verified.
+- `EXPIRED` (`valid=False`): Cookies have expired or the platform returned a 401/login redirect. Re-authentication required.
+- `MISSING` (`valid=False`): Session file does not exist. Run interactive setup.
+- `INVALID` (`valid=False`): File corrupted or decryption failed. Re-run interactive setup.
+- `CHECK_FAILED` (`valid=False`): Network timeout, DNS failure, or bot challenge during verification.
+
+On any non-valid status, the Worker strictly fails closed to `MANUAL_APPLICATION_REQUIRED` without attempting form filling or submitting.
 
 #### 2. Running the Worker
 ```bash
