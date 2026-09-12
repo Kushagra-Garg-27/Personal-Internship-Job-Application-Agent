@@ -89,20 +89,30 @@ SESSION_REMEDIATION_GUIDE: dict[str, str] = {
 
 
 def probe_authenticated_endpoint(
-    cookies: list[dict[str, Any]],
+    cookies_or_state: list[dict[str, Any]] | dict[str, Any],
     endpoint_url: str = "https://unstop.com/api/profile",
     timeout: float = 10.0,
+    storage_state: dict[str, Any] | None = None,
 ) -> tuple[bool, AuthState, str]:
     """Perform a read-only probe against an authenticated Unstop endpoint.
 
+    Accepts either a list of cookies or the full Playwright storage_state dict.
+    Extracts accessToken from localStorage origins when present.
     Never exposes cookies, tokens, or credentials in returned detail or logs.
     """
     import urllib.error
     import urllib.request
 
+    if isinstance(cookies_or_state, dict):
+        state = cookies_or_state
+        cookies = state.get("cookies", [])
+    else:
+        cookies = cookies_or_state
+        state = storage_state
+
     unstop_cookies = [
         f"{c['name']}={c['value']}"
-        for c in cookies
+        for c in (cookies or [])
         if "unstop.com" in c.get("domain", "") and c.get("name") and c.get("value")
     ]
     if not unstop_cookies:
@@ -110,21 +120,43 @@ def probe_authenticated_endpoint(
 
     cookie_header = "; ".join(unstop_cookies)
 
+    # Extract optional accessToken from storage state localStorage origins
+    access_token: str | None = None
+    if isinstance(state, dict):
+        origins = state.get("origins", [])
+        for orig in origins:
+            if "unstop.com" in orig.get("origin", ""):
+                for item in orig.get("localStorage", []):
+                    if item.get("name") in ("accessToken", "access_token", "token") and item.get("value"):
+                        val = str(item["value"]).strip()
+                        if val:
+                            access_token = val
+                            break
+            if access_token:
+                break
+
     class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, req, fp, code, msg, headers, newurl):
             return None
 
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*",
+        "Referer": "https://unstop.com/",
+        "Origin": "https://unstop.com",
+        "X-Requested-With": "XMLHttpRequest",
+        "Cookie": cookie_header,
+    }
+    if access_token:
+        headers["Authorization"] = f"Bearer {access_token}"
+
     opener = urllib.request.build_opener(_NoRedirectHandler)
     req = urllib.request.Request(
         endpoint_url,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/json, text/plain, */*",
-            "Cookie": cookie_header,
-        },
+        headers=headers,
     )
 
     try:
@@ -279,7 +311,7 @@ class UnstopAdapter(BasePlatformAdapter):
         # Optional live endpoint verification probe
         if should_probe:
             is_valid, probe_status, probe_detail = probe_authenticated_endpoint(
-                unstop_cookies, timeout=timeout
+                unstop_cookies, timeout=timeout, storage_state=storage_state
             )
             return SessionStatus(
                 valid=is_valid,
