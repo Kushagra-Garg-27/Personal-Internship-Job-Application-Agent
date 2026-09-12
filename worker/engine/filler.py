@@ -383,9 +383,9 @@ class ApplicationFiller:
 
         # ── Experimental Browser Tier ─────────────────────────────────
         # The candidate physically clicked submit in the opened browser window.
-        # Success is recorded only when the platform itself confirmed receipt;
-        # an unconfirmed outcome keeps the application in its pre-submit review
-        # state and never writes a false `submitted`.
+        # We only record success when the platform itself confirmed receipt;
+        # anything else stays in the pre-submit review state (never a false
+        # `submitted`).
         if not hasattr(adapter, "execute_submission"):
             if not platform_confirmed:
                 unconfirmed_reason = (
@@ -432,10 +432,7 @@ class ApplicationFiller:
                 session,
                 opp.id,
                 OpportunityStatus.APPLIED,
-                reason=(
-                    f"Explicit human approval ({approval_actor}) and platform-confirmed "
-                    f"submission in {adapter.adapter_name} ({conf_ref})"
-                ),
+                reason="Browser application physically confirmed submitted by platform after explicit human approval",
                 actor=approval_actor,
             )
             session.commit()
@@ -448,6 +445,7 @@ class ApplicationFiller:
                 "submitted_at": now.isoformat(),
                 "mode": "browser_confirmed",
             }
+
 
         # ── Stable HTTP API Tier ──────────────────────────────────────
         # Candidate reviews pending draft payload and explicitly authorizes
@@ -560,3 +558,171 @@ class ApplicationFiller:
             "confirmation_ref": conf_ref,
             "submitted_at": now.isoformat(),
         }
+
+    def execute_browser_submission(self, session: Session, application_id: int, approval_token: str) -> dict[str, Any]:
+        """Orchestrate the autonomous browser submission for an explicitly approved application.
+        
+        This securely bridges the human approval gate to the actual Playwright browser execution.
+        """
+        import json
+        from pathlib import Path
+        from core.status import HUMAN_SUBMISSION_APPROVAL_TOKEN, ApplicationStatus, OpportunityStatus
+        from core.models.opportunity import Opportunity, Application
+        from datetime import datetime, timezone
+
+        if not isinstance(approval_token, str) or approval_token != HUMAN_SUBMISSION_APPROVAL_TOKEN:
+            raise PermissionError("execute_browser_submission requires valid human approval token")
+
+        app = session.get(Application, application_id)
+        if app is None:
+            raise ValueError(f"Application {application_id} not found.")
+
+        if app.status == ApplicationStatus.SUBMITTED.value:
+            return {"success": True, "already_submitted": True}
+
+        if app.status not in {ApplicationStatus.FORM_FILLED.value, ApplicationStatus.PENDING.value}:
+            raise ValueError(f"Cannot submit application in status {app.status!r}")
+
+        opp = session.get(Opportunity, app.opportunity_id)
+        if opp is None:
+            raise ValueError(f"Opportunity {app.opportunity_id} not found.")
+
+        if opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
+            raise ValueError(f"Cannot submit application for opportunity in status {opp.status!r}")
+
+        notes_data = {}
+        if app.notes:
+            try:
+                notes_data = json.loads(app.notes)
+            except Exception:
+                pass
+
+        if not notes_data.get("submission_claimed"):
+            raise RuntimeError(f"Application #{app.id} must be claimed before executing browser submission")
+
+        if self.adapter_override is not None:
+            adapter = self.adapter_override
+        else:
+            adapter = resolve_adapter(opp)
+        if not hasattr(adapter, "submit_application"):
+            raise TypeError(f"Adapter {type(adapter).__name__} does not implement submit_application")
+
+        logger.info("Executing browser submission for App #%d (Opp #%d)", app.id, opp.id)
+
+        try:
+            # 1. Reach the final review screen using the safe fill logic
+            fill_res = self.process_opportunity(session, opp.id)
+            if not fill_res.get("success"):
+                logger.error("Failed to reach final review screen: %s", fill_res)
+                return {"success": False, "error": "Could not recreate form state for submission"}
+            
+            app_ctx = fill_res.get("app_ctx")
+            if not app_ctx:
+                 return {"success": False, "error": "No ApplicationContext available from fill"}
+
+            # 2. Execute the actual click and verify confirmation
+            submit_res = adapter.submit_application(app_ctx, approval_token=approval_token)
+            
+            if not submit_res.get("success"):
+                # AMBIGUOUS TIMEOUT / FAILURE - FAIL CLOSED
+                reason = submit_res.get("error") or "Submission failed or timed out ambiguously"
+                logger.error("Browser submission failed or ambiguous: %s", reason)
+                
+                application_service.transition_application_status(
+                    session,
+                    app.id,
+                    ApplicationStatus.FAILED,
+                    notes=f"{app.notes}\n[SUBMIT_ERROR]: {reason}",
+                    reason=reason,
+                )
+                opportunity_service.transition_status(
+                    session,
+                    opp.id,
+                    OpportunityStatus.MANUAL_APPLICATION_REQUIRED,
+                    reason=reason,
+                    actor="worker_submission",
+                )
+                session.commit()
+                return {"success": False, "status": "manual_required", "reason": reason}
+
+            # VERIFIED SUCCESS
+            now = datetime.now(timezone.utc)
+            conf_ref = submit_res.get("confirmation_ref") or f"BROWSER-{adapter.adapter_name.upper()}-CONFIRMED"
+            
+            # Evidence Capture
+            artifacts_dir = Path("artifacts/u7_submission_evidence")
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = now.strftime("%Y%m%d_%H%M%S")
+            evidence_file = artifacts_dir / f"app_{app.id}_{timestamp}_evidence.json"
+            screenshot_file = artifacts_dir / f"app_{app.id}_{timestamp}_success.png"
+            
+            evidence_data = {
+                "application_id": app.id,
+                "opportunity_id": opp.id,
+                "adapter": adapter.adapter_name,
+                "timestamp": now.isoformat(),
+                "confirmation_ref": conf_ref,
+                "clicked_selector": submit_res.get("clicked_selector"),
+                "final_url": submit_res.get("url"),
+                "status": "verified_success"
+            }
+            
+            try:
+                page = app_ctx.browser_page
+                if page:
+                    page.screenshot(path=str(screenshot_file), full_page=True)
+                    evidence_data["screenshot_path"] = str(screenshot_file)
+            except Exception as e:
+                logger.warning("Failed to capture submission screenshot: %s", e)
+
+            with open(evidence_file, "w") as f:
+                json.dump(evidence_data, f, indent=2)
+
+            # Persist state
+            notes_data = {}
+            if app.notes:
+                try:
+                    notes_data = json.loads(app.notes)
+                except Exception:
+                    pass
+
+            details = {
+                **(notes_data or {}),
+                "submission_confirmation": {
+                    "source": "platform_browser",
+                    "confirmed": True,
+                    "confirmation_ref": conf_ref,
+                    "evidence_file": str(evidence_file),
+                    "confirmed_at": now.isoformat(),
+                    "approved_by": notes_data.get("approved_by", "unknown"),
+                },
+            }
+
+            application_service.update_application_status(
+                session,
+                app.id,
+                status="submitted",
+                submitted_at=now,
+                confirmation_ref=conf_ref,
+                notes=json.dumps(details, default=str),
+            )
+            opportunity_service.transition_status(
+                session,
+                opp.id,
+                OpportunityStatus.APPLIED,
+                reason=f"Worker successfully executed and verified browser submission ({conf_ref})",
+                actor="worker_submission",
+            )
+            session.commit()
+            
+            return {
+                "success": True,
+                "status": "applied",
+                "confirmed": True,
+                "confirmation_ref": conf_ref,
+                "evidence": str(evidence_file)
+            }
+
+        except Exception as e:
+            logger.exception("Unexpected exception during execute_browser_submission: %s", e)
+            return {"success": False, "error": str(e)}

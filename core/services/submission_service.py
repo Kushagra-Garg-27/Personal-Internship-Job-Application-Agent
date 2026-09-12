@@ -279,72 +279,30 @@ def confirm_and_submit(
     )
 
     # ── Experimental Browser Tier ─────────────────────────────────────
-    # The candidate physically clicked submit in the opened browser window.
-    # We only record success when the platform itself confirmed receipt;
-    # anything else stays in the pre-submit review state (never a false
-    # `submitted`).
+    # The candidate explicitly approved the submission. We record the approval
+    # in the application notes and leave it in the pre-submit review state
+    # (AWAITING_SUBMISSION / FORM_FILLED). The background browser worker will
+    # pick it up and execute the autonomous Playwright submission.
     if is_browser_tier:
-        if not platform_confirmed:
-            unconfirmed_reason = (
-                confirmation_detail
-                or "Platform confirmation not observed after human-approved submission."
-            )
-            logger.error(
-                "Browser-tier submission for application #%d was approved but NOT confirmed by %s: %s",
-                app.id,
-                adapter_name,
-                unconfirmed_reason,
-            )
-            return {
-                "success": False,
-                "status": "unconfirmed",
-                "confirmed": False,
-                "mode": "browser_confirmed",
-                "reason": unconfirmed_reason,
-                "opportunity_status": opp.status,
-                "application_status": app.status,
-            }
-
-        now = datetime.now(timezone.utc)
-        conf_ref = confirmation_ref or f"BROWSER-{adapter_name.upper()}-CONFIRMED"
         details = {
             **(notes_data or {}),
-            "submission_confirmation": {
-                "source": "platform",
-                "confirmed": True,
-                "confirmation_ref": conf_ref,
-                "detail": confirmation_detail,
-                "confirmed_at": now.isoformat(),
-                "approved_by": approval_actor,
-            },
+            "approval_token": approval_token,
+            "approved_by": approval_actor,
+            "submission_requested_at": datetime.now(timezone.utc).isoformat()
         }
         application_service.update_application_status(
             session,
             app.id,
-            status="submitted",
-            submitted_at=now,
-            confirmation_ref=conf_ref,
+            status=app.status,
             notes=json.dumps(details, default=str),
         )
-        opportunity_service.transition_status(
-            session,
-            opp.id,
-            OpportunityStatus.APPLIED,
-            reason=(
-                f"Explicit human approval ({approval_actor}) and platform-confirmed "
-                f"submission in {adapter_name} ({conf_ref})"
-            ),
-            actor=approval_actor,
-        )
         session.commit()
+        logger.info("Application #%d approved for browser-tier submission. Worker will execute.", app.id)
         return {
             "success": True,
-            "status": "applied",
-            "confirmed": True,
-            "confirmation_ref": conf_ref,
-            "confirmation_detail": confirmation_detail,
-            "submitted_at": now.isoformat(),
-            "mode": "browser_confirmed",
+            "status": "approved_for_submission",
+            "message": "Approval recorded. Background worker will perform submission.",
+            "mode": "browser_orchestrator",
         }
 
     # ── Stable HTTP API Tier ──────────────────────────────────────────

@@ -88,14 +88,27 @@ def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, 
     data = resp.json()
 
     assert data["success"] is True
-    assert data["status"] == "applied"
-    assert data["mode"] == "browser_confirmed"
-    assert data["confirmed"] is True
+    assert data["status"] == "approved_for_submission"
+    assert data["mode"] == "browser_orchestrator"
+    assert "Background worker will perform submission" in data["message"]
 
+    # In U7.0, API approval records approval but does NOT directly submit or mark applied.
+    # The application remains in pre-worker approval-queued state (FORM_FILLED / AWAITING_SUBMISSION).
+    # Actual submission requires worker execution; no browser submission is performed by API tier.
     db_session.refresh(opp)
-    assert opp.status == OpportunityStatus.APPLIED.value
+    assert opp.status == OpportunityStatus.AWAITING_SUBMISSION.value
+    assert opp.status != OpportunityStatus.APPLIED.value
+
     db_session.refresh(app)
-    assert app.status == "submitted"
+    assert app.status == ApplicationStatus.FORM_FILLED.value
+    assert app.status != ApplicationStatus.SUBMITTED.value
+    assert app.submitted_at is None
+    assert app.confirmation_ref is None
+
+    notes_data = json.loads(app.notes)
+    assert notes_data["approval_token"] == HUMAN_SUBMISSION_APPROVAL_TOKEN
+    assert notes_data["approved_by"] == "human_user"
+    assert "submission_requested_at" in notes_data
 
 
 def test_confirm_submit_http_tier_without_worker(client: TestClient, db_session, monkeypatch):
