@@ -13,6 +13,7 @@ import type {
   CandidateProfile,
   CandidateProfileUpdate,
   ApplicationResponse,
+  ApprovalTokenResponse,
   ConfirmSubmitRequest,
   ConfirmSubmitResponse,
 } from '../types';
@@ -246,11 +247,27 @@ export const api = {
     });
   },
 
-  // ── Application Attempts & Submission (U4) ──────────────────────────────
+  // ── Application Attempts & Submission (U4 / M1) ────────────────────
   async listApplications(opportunityId: number): Promise<ApplicationResponse[]> {
     return request<ApplicationResponse[]>(`/opportunities/${opportunityId}/applications`);
   },
 
+  /**
+   * Phase 1 of M1 two-phase approval: mint a server-issued, time-boxed token.
+   * Call this BEFORE confirmSubmitApplication. The returned token must be
+   * echoed back as approval_token in the confirm-submit payload.
+   */
+  async requestApprovalToken(applicationId: number): Promise<ApprovalTokenResponse> {
+    return request<ApprovalTokenResponse>(
+      `/applications/${applicationId}/request-approval-token`,
+      { method: 'POST' },
+    );
+  },
+
+  /**
+   * Phase 2 of M1 two-phase approval: send the server-issued token back to
+   * confirm and execute (or queue) the submission.
+   */
   async confirmSubmitApplication(
     applicationId: number,
     payload: ConfirmSubmitRequest,

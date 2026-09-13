@@ -19,7 +19,6 @@ from core.models.resume import Resume
 from core.services import opportunity_service
 from core.services.submission_service import confirm_and_submit
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
     ReliabilityTier,

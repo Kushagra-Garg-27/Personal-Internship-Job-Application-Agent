@@ -1,8 +1,12 @@
-"""Worker runner and APScheduler queue poller (Phase 9).
+"""Worker runner and APScheduler queue poller (Phase 9 / M1).
 
 Polls the durable `opportunities` table for listings in `ready_to_apply` status.
 Because state is tracked durably in the database rather than an in-memory queue,
 the Worker can restart at any time and resume cleanly without dropping tasks.
+
+M1: Claim state is now stored in dedicated Application columns
+(``approved_at``, ``submission_claimed_at``, ``claimed_by``) rather than the
+``notes`` JSON blob.  Atomic claim uses a column-predicate UPDATE.
 """
 
 from __future__ import annotations
@@ -13,13 +17,14 @@ from typing import Any
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from core.database import get_session
-from core.models.opportunity import Opportunity
-from core.status import ApplicationStatus, OpportunityStatus, is_human_approved
+from core.models.opportunity import Application, Opportunity
+from core.status import ApplicationStatus, OpportunityStatus
+from core.tokens import is_token_valid
 from worker.engine.filler import ApplicationFiller
 
 logger = logging.getLogger(__name__)
@@ -75,72 +80,67 @@ class WorkerRunner:
         application_id: int,
         worker_id: str = "worker",
     ) -> bool:
-        """Atomically claim an approved application in the database for browser submission.
-        
-        Guarantees that at most one worker process can claim an application.
-        Uses a conditional UPDATE to ensure atomic exclusion across worker processes.
-        """
-        from core.models.opportunity import Application, Opportunity
-        from core.status import ApplicationStatus, OpportunityStatus, is_human_approved
-        from sqlalchemy import update
-        from datetime import datetime, timezone
-        import json
+        """Atomically claim an approved application for browser submission (M1).
 
+        Uses a column-predicate UPDATE on the dedicated approval/claim columns
+        rather than SQL LIKE matching against the notes JSON blob.  At most one
+        worker process can win the claim race for a given application_id.
+
+        Returns True if this caller won the claim; False otherwise.
+        """
         app = session.get(Application, application_id)
-        if not app or not app.notes:
+        if app is None:
             return False
 
+        # Pre-flight: already submitted or already claimed?
         if app.status == ApplicationStatus.SUBMITTED.value:
             return False
-
-        try:
-            notes_data = json.loads(app.notes)
-        except Exception:
+        if app.submission_claimed_at is not None:
             return False
 
-        # Verify approval token
-        if not is_human_approved(notes_data.get("approval_token")):
+        # Pre-flight: valid DB-based approval present?
+        # approved_at is the durable approval record; the token is cleared after
+        # confirm_and_submit (single-use). Check approved_at — not the token.
+        if app.approved_at is None:
             return False
-
-        # If already claimed, cannot claim
-        if notes_data.get("submission_claimed"):
-            return False
+        # If the token is still present (pre-confirm), enforce expiry too.
+        if app.approval_token is not None and app.approval_token_expires_at is not None:
+            if not is_token_valid(app.approval_token, app.approval_token, app.approval_token_expires_at):
+                return False
 
         opp = session.get(Opportunity, app.opportunity_id)
-        if not opp or opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
+        if opp is None or opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
             return False
 
-        # Record claim
-        now_iso = datetime.now(timezone.utc).isoformat()
-        notes_data["submission_claimed"] = True
-        notes_data["claimed_at"] = now_iso
-        notes_data["claimed_by"] = worker_id
-        claimed_notes = json.dumps(notes_data, default=str)
+        # Use naive UTC for the SQL WHERE clause — SQLite stores naive datetimes
+        # and SQLAlchemy's in-memory evaluator can't compare naive vs aware.
+        now_naive = datetime.utcnow()
 
-        # Atomic conditional update: update ONLY IF notes does not already have submission_claimed: true
+        # Atomic conditional UPDATE: wins only if submission_claimed_at is still NULL.
+        # approved_at IS NOT NULL is the durable authorization signal (token may be
+        # already consumed / cleared by confirm_and_submit).
         stmt = (
             update(Application)
             .where(
                 Application.id == application_id,
+                Application.submission_claimed_at.is_(None),
+                Application.approved_at.isnot(None),
                 Application.status != ApplicationStatus.SUBMITTED.value,
-                ~Application.notes.like('%"submission_claimed": true%'),
-                ~Application.notes.like('%"submission_claimed":true%'),
             )
-            .values(notes=claimed_notes)
+            .values(
+                submission_claimed_at=now_naive,
+                claimed_by=worker_id,
+            )
         )
         result = session.execute(stmt)
         session.commit()
-
-        # Refresh app instance
         session.refresh(app)
         return result.rowcount > 0
 
-    def poll_and_submit_queue(self, session: Session, limit: int = 10, worker_id: str = "worker") -> list[dict[str, Any]]:
-        """Run a single cycle to execute explicitly-approved browser submissions (U7)."""
-        from core.models.opportunity import Application
-        from core.status import is_human_approved
-        import json
 
+    def poll_and_submit_queue(self, session: Session, limit: int = 10, worker_id: str = "worker") -> list[dict[str, Any]]:
+        """Run a single cycle to execute explicitly-approved browser submissions (U7 / M1)."""
+        now = datetime.now(timezone.utc)
         stmt = (
             select(Opportunity)
             .where(Opportunity.status == OpportunityStatus.AWAITING_SUBMISSION.value)
@@ -155,39 +155,38 @@ class WorkerRunner:
 
         for opp in awaiting_opps:
             try:
-                # Find the active application
+                # Find the most recent active application for this opportunity
                 app = session.scalar(
                     select(Application)
                     .where(Application.opportunity_id == opp.id)
                     .order_by(Application.attempt_number.desc())
                 )
-                if not app or not app.notes:
+                if app is None:
                     continue
 
+                # Skip already-submitted
                 if app.status == ApplicationStatus.SUBMITTED.value:
                     continue
 
-                try:
-                    notes_data = json.loads(app.notes)
-                except Exception:
-                    continue
-                
-                # Verify that the API recorded a valid human approval token for this browser-tier app
-                approval_token = notes_data.get("approval_token")
-                if not is_human_approved(approval_token):
+                # M1: Validate DB-column approval (no notes JSON, no static constant)
+                if app.approved_at is None:
+                    continue  # Human has not confirmed yet
+                if not is_token_valid(
+                    app.approval_token, app.approval_token, app.approval_token_expires_at
+                ):
+                    continue  # Token absent or expired
+
+                # Skip already-claimed
+                if app.submission_claimed_at is not None:
                     continue
 
-                # Skip if already claimed by another worker or in-progress submission
-                if notes_data.get("submission_claimed"):
-                    continue
-
-                # Atomically claim candidate before starting browser submission
+                # Atomically claim before starting browser submission
                 claimed = self.claim_application_for_submission(session, app.id, worker_id=worker_id)
                 if not claimed:
                     logger.info("Application #%d was already claimed by another worker; skipping.", app.id)
                     continue
 
-                res = self.filler.execute_browser_submission(session, app.id, approval_token)
+                res = self.filler.execute_browser_submission(session, app.id)
                 results.append(res)
             except Exception as exc:
                 logger.exception("Error submitting opportunity #%d: %s", opp.id, exc)

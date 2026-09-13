@@ -213,6 +213,29 @@ class Application(TimestampMixin, Base):
     adapter_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # ── M1: Hardened approval-token columns ────────────────────────────
+    # These replace the old practice of storing approval/claim state inside
+    # the free-text ``notes`` JSON blob.  All columns are nullable with no
+    # server default so that existing rows remain valid.
+    approval_token: Mapped[str | None] = mapped_column(
+        String(255), nullable=True
+    )  # server-generated UUID; set by issue_approval_token()
+    approved_by: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )  # audit label of the human who confirmed
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # set by confirm_and_submit(); NULL until human confirms
+    approval_token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # TTL boundary; worker rejects expired tokens
+    submission_claimed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # set atomically by worker; NULL until claimed
+    claimed_by: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )  # worker-id that won the claim race
+
     # ── Relationships ─────────────────────────────────────────────────
     opportunity: Mapped[Opportunity] = relationship(back_populates="applications")
     resume: Mapped["Resume"] = relationship(lazy="selectin")  # noqa: F821

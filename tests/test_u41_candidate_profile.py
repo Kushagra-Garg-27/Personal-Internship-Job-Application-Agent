@@ -26,12 +26,11 @@ from core.models.opportunity import Application, Opportunity
 from core.repositories import profile_repo
 from core.services import application_service, opportunity_service, profile_service
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
     SubmissionApprovalRequiredError,
-    is_human_approved,
 )
+from core.tokens import generate_approval_token, is_token_valid, make_token_expiry
 from worker.adapters.unstop import UnstopAdapter, QuestionClassification
 from worker.engine.filler import ApplicationFiller, serialize_profile
 
@@ -212,9 +211,21 @@ def test_seed_identity_is_not_special_cased(db_session):
 # ── 11 & 12. U4 gate remains fail-closed; fill-only never submits ─────────
 
 def test_submission_gate_remains_fail_closed(db_session):
-    assert is_human_approved(None) is False
-    assert is_human_approved("ready_for_review") is False
-    assert is_human_approved(HUMAN_SUBMISSION_APPROVAL_TOKEN) is True
+    """M1: token validation is fail-closed; nil/short/expired/mismatched tokens reject."""
+    from datetime import datetime, timedelta, timezone
+
+    # is_token_valid fails closed on None, empty, mismatched, and expired
+    good = generate_approval_token()
+    exp_future = make_token_expiry()
+    exp_past = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    assert is_token_valid(None, good, exp_future) is False
+    assert is_token_valid("", good, exp_future) is False
+    assert is_token_valid("HUMAN_CONFIRMED_SUBMIT", good, exp_future) is False  # old static string rejected
+    assert is_token_valid(good, good, exp_past) is False  # expired
+    assert is_token_valid(good, None, exp_future) is False  # no stored token
+    assert is_token_valid(good, good, None) is False  # no expiry recorded
+    assert is_token_valid(good, good, exp_future) is True  # valid case
 
     opp = _ready_unstop_opp(db_session)
     app = application_service.create_application(db_session, opp.id, adapter_name="unstop")
@@ -224,6 +235,7 @@ def test_submission_gate_remains_fail_closed(db_session):
     )
     db_session.commit()
 
+    # No token issued -> confirm_and_submit must raise (fail closed)
     with pytest.raises(SubmissionApprovalRequiredError):
         ApplicationFiller().confirm_and_submit(db_session, app.id)
 

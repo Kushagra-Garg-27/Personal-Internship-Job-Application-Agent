@@ -14,8 +14,8 @@ import pytest
 
 from core.models.opportunity import Application, Opportunity
 from core.services import application_service, opportunity_service
+from core.services.submission_service import issue_approval_token
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
     SubmissionApprovalRequiredError,
@@ -58,6 +58,10 @@ def test_confirm_submit_stable_http_tier(db_session):
     )
     db_session.commit()
 
+    # M1: issue server-side token, then pass it to confirm_and_submit
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     filler = ApplicationFiller()
     with patch.object(GreenhouseAdapter, "execute_submission") as mock_exec:
         mock_exec.return_value = {
@@ -67,7 +71,7 @@ def test_confirm_submit_stable_http_tier(db_session):
         }
 
         result = filler.confirm_and_submit(
-            db_session, app.id, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN
+            db_session, app.id, approval_token=token
         )
 
         assert result["success"] is True
@@ -108,12 +112,16 @@ def test_confirm_submit_experimental_browser_tier(db_session):
     )
     db_session.commit()
 
+    # M1: issue server-side token
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     filler = ApplicationFiller()
     # No HTTP call made; records the platform-confirmed browser submission.
     result = filler.confirm_and_submit(
         db_session,
         app.id,
-        approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN,
+        approval_token=token,
         platform_confirmed=True,
         confirmation_ref="BROWSER-INTERNSHALA-CONFIRMED",
         confirmation_detail="Internshala displayed 'Application submitted'.",
@@ -158,8 +166,12 @@ def test_browser_tier_requires_platform_confirmation(db_session):
     )
     db_session.commit()
 
+    # M1: issue a token but call without platform_confirmed -> stays unconfirmed
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     result = ApplicationFiller().confirm_and_submit(
-        db_session, app.id, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN
+        db_session, app.id, approval_token=token
     )
 
     assert result["success"] is False
@@ -173,7 +185,7 @@ def test_browser_tier_requires_platform_confirmation(db_session):
 
 
 def test_confirm_submit_without_approval_token_fails_closed(db_session):
-    """U4: no explicit human approval token -> no submission is permitted."""
+    """M1: no server-issued token -> no submission is permitted (fail closed)."""
     opp = opportunity_service.create_opportunity(
         db_session,
         title="Web Developer Intern",
@@ -200,8 +212,8 @@ def test_confirm_submit_without_approval_token_fails_closed(db_session):
     db_session.commit()
 
     filler = ApplicationFiller()
-    # Every non-approval signal must fail closed.
-    for probe in [None, "", "true", "ready_for_review", "submitted", "awaiting_submission"]:
+    # No token issued yet — every attempt must fail closed.
+    for probe in [None, "", "true", "ready_for_review", "submitted", "HUMAN_CONFIRMED_SUBMIT"]:
         with pytest.raises(SubmissionApprovalRequiredError):
             filler.confirm_and_submit(db_session, app.id, approval_token=probe)
 

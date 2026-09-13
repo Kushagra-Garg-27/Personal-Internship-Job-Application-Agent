@@ -3,11 +3,11 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { SubmissionReviewModal } from './SubmissionReviewModal';
 import { api } from '../../api/client';
 import type { DashboardOpportunityItem, ApplicationResponse } from '../../types';
-import { HUMAN_SUBMISSION_APPROVAL_TOKEN } from '../../types';
 
 vi.mock('../../api/client', () => ({
   api: {
     listApplications: vi.fn(),
+    requestApprovalToken: vi.fn(),
     confirmSubmitApplication: vi.fn(),
   },
 }));
@@ -202,17 +202,26 @@ describe('SubmissionReviewModal (U4 Human Submission Gate)', () => {
     });
     fireEvent.click(checkbox);
 
+    // M1: mock requestApprovalToken to return a server-issued UUID
+    const mockToken = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    vi.mocked(api.requestApprovalToken).mockResolvedValueOnce({
+      token: mockToken,
+      expires_at: '2026-12-31T23:59:59Z',
+    });
+
     const submitBtn = screen.getByRole('button', { name: /Confirm & Submit Application/i });
     fireEvent.click(submitBtn);
 
     await waitFor(() => {
+      // M1 Phase 1: requestApprovalToken called first
+      expect(api.requestApprovalToken).toHaveBeenCalledTimes(1);
+      expect(api.requestApprovalToken).toHaveBeenCalledWith(99);
+      // M1 Phase 2: confirmSubmitApplication called with server-issued token
       expect(api.confirmSubmitApplication).toHaveBeenCalledTimes(1);
-      // 5. Correct application ID (99)
-      // 6. Required human approval token (HUMAN_CONFIRMED_SUBMIT)
       expect(api.confirmSubmitApplication).toHaveBeenCalledWith(
         99,
         expect.objectContaining({
-          approval_token: HUMAN_SUBMISSION_APPROVAL_TOKEN,
+          approval_token: mockToken,
           approved_by: 'human_user',
           platform_confirmed: true,
         })

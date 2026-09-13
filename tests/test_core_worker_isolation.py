@@ -1,9 +1,11 @@
-"""Tests ensuring Core has zero import-time or call-time dependency on Worker.
+"""Tests ensuring Core has zero import-time or call-time dependency on Worker (M1).
 
 Verifies:
 1. Core (api.main, routers, services) can be imported and executed in an environment
    where `worker` is completely absent from the Python path.
 2. The `/applications/{id}/confirm-submit` endpoint completes successfully without `worker`.
+3. The M1 approval flow (request-approval-token → confirm-submit) works end-to-end
+   through the HTTP layer.
 """
 
 from __future__ import annotations
@@ -16,34 +18,69 @@ from fastapi.testclient import TestClient
 
 from core.models.opportunity import Application, Opportunity
 from core.services import application_service, opportunity_service
+from core.services.submission_service import issue_approval_token
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
 )
 
-APPROVED_BODY = {
-    "approval_token": HUMAN_SUBMISSION_APPROVAL_TOKEN,
-    "approved_by": "human_user",
-}
+
+def _make_approval_body(token: str) -> dict:
+    """Build confirm-submit payload for M1 tests."""
+    return {
+        "approval_token": token,
+        "approved_by": "human_user",
+    }
 
 
 def test_core_imports_without_worker(monkeypatch):
     """Confirm api.main and core modules can be imported with worker masked out."""
-    # Ensure worker is masked so any import attempt raises ModuleNotFoundError
     monkeypatch.setitem(sys.modules, "worker", None)
     monkeypatch.setitem(sys.modules, "worker.engine", None)
     monkeypatch.setitem(sys.modules, "worker.engine.filler", None)
     monkeypatch.setitem(sys.modules, "worker.adapters", None)
 
-    # Re-import api.main cleanly
     import api.main
     assert api.main.app is not None
 
 
+def test_request_approval_token_endpoint(client: TestClient, db_session):
+    """POST request-approval-token mints a server-issued UUID (M1)."""
+    opp = opportunity_service.create_opportunity(
+        db_session,
+        title="Token Test Internship",
+        company="TokenCo",
+        url="https://internshala.com/job/tok1",
+        source="internshala",
+        reliability_tier="experimental",
+    )
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.RECOMMENDED)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.READY_TO_APPLY)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.AWAITING_SUBMISSION)
+
+    app = application_service.create_application(
+        db_session, opportunity_id=opp.id, adapter_name="internshala"
+    )
+    application_service.transition_application_status(
+        db_session, app.id, ApplicationStatus.FORM_FILLED
+    )
+    db_session.commit()
+
+    resp = client.post(f"/applications/{app.id}/request-approval-token")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "token" in data
+    assert len(data["token"]) >= 32
+    assert "expires_at" in data
+
+    # Token must be persisted in DB
+    db_session.refresh(app)
+    assert app.approval_token == data["token"]
+    assert app.approval_token_expires_at is not None
+
+
 def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, monkeypatch):
-    """Test POST /applications/{id}/confirm-submit executes without worker package present."""
-    # Setup an application in awaiting_submission
+    """POST confirm-submit executes without worker package present (M1 token flow)."""
     opp = opportunity_service.create_opportunity(
         db_session,
         title="Software Engineer",
@@ -57,9 +94,7 @@ def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, 
     opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.AWAITING_SUBMISSION)
 
     app = application_service.create_application(
-        db_session,
-        opportunity_id=opp.id,
-        adapter_name="internshala",
+        db_session, opportunity_id=opp.id, adapter_name="internshala"
     )
     application_service.transition_application_status(
         db_session,
@@ -69,16 +104,19 @@ def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, 
     )
     db_session.commit()
 
+    # M1: issue a server-side token first
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     # Mask worker out completely
     monkeypatch.setitem(sys.modules, "worker", None)
     monkeypatch.setitem(sys.modules, "worker.engine", None)
     monkeypatch.setitem(sys.modules, "worker.engine.filler", None)
 
-    # Call the API endpoint with explicit human approval and platform confirmation
     resp = client.post(
         f"/applications/{app.id}/confirm-submit",
         json={
-            **APPROVED_BODY,
+            **_make_approval_body(token),
             "platform_confirmed": True,
             "confirmation_ref": "BROWSER-INTERNSHALA-CONFIRMED",
             "confirmation_detail": "Internshala showed 'Application submitted'.",
@@ -92,9 +130,7 @@ def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, 
     assert data["mode"] == "browser_orchestrator"
     assert "Background worker will perform submission" in data["message"]
 
-    # In U7.0, API approval records approval but does NOT directly submit or mark applied.
-    # The application remains in pre-worker approval-queued state (FORM_FILLED / AWAITING_SUBMISSION).
-    # Actual submission requires worker execution; no browser submission is performed by API tier.
+    # M1: approval stored in columns, not notes JSON
     db_session.refresh(opp)
     assert opp.status == OpportunityStatus.AWAITING_SUBMISSION.value
     assert opp.status != OpportunityStatus.APPLIED.value
@@ -104,15 +140,43 @@ def test_confirm_submit_endpoint_without_worker(client: TestClient, db_session, 
     assert app.status != ApplicationStatus.SUBMITTED.value
     assert app.submitted_at is None
     assert app.confirmation_ref is None
+    # M1: check dedicated columns instead of notes JSON
+    assert app.approved_at is not None
+    assert app.approved_by == "human_user"
 
-    notes_data = json.loads(app.notes)
-    assert notes_data["approval_token"] == HUMAN_SUBMISSION_APPROVAL_TOKEN
-    assert notes_data["approved_by"] == "human_user"
-    assert "submission_requested_at" in notes_data
+
+def test_confirm_submit_rejected_without_valid_token(client: TestClient, db_session):
+    """Confirm-submit with no prior token issuance returns 403 (fail closed, M1)."""
+    opp = opportunity_service.create_opportunity(
+        db_session,
+        title="Gated Job",
+        company="GatedCo",
+        url="https://internshala.com/job/gated",
+        source="internshala",
+        reliability_tier="experimental",
+    )
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.RECOMMENDED)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.READY_TO_APPLY)
+    opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.AWAITING_SUBMISSION)
+
+    app = application_service.create_application(
+        db_session, opportunity_id=opp.id, adapter_name="internshala"
+    )
+    application_service.transition_application_status(
+        db_session, app.id, ApplicationStatus.FORM_FILLED
+    )
+    db_session.commit()
+
+    # Submit without requesting a token — must fail closed
+    resp = client.post(
+        f"/applications/{app.id}/confirm-submit",
+        json={"approval_token": "HUMAN_CONFIRMED_SUBMIT", "approved_by": "human_user"},
+    )
+    assert resp.status_code == 403
 
 
 def test_confirm_submit_http_tier_without_worker(client: TestClient, db_session, monkeypatch):
-    """Test POST /applications/{id}/confirm-submit for stable HTTP tier without worker package."""
+    """POST confirm-submit for stable HTTP tier without worker package (M1 token flow)."""
     opp = opportunity_service.create_opportunity(
         db_session,
         title="Backend Engineer",
@@ -126,9 +190,7 @@ def test_confirm_submit_http_tier_without_worker(client: TestClient, db_session,
     opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.AWAITING_SUBMISSION)
 
     app = application_service.create_application(
-        db_session,
-        opportunity_id=opp.id,
-        adapter_name="greenhouse",
+        db_session, opportunity_id=opp.id, adapter_name="greenhouse"
     )
     draft_notes = {
         "adapter": "greenhouse",
@@ -138,14 +200,14 @@ def test_confirm_submit_http_tier_without_worker(client: TestClient, db_session,
         },
     }
     application_service.transition_application_status(
-        db_session,
-        app.id,
-        ApplicationStatus.FORM_FILLED,
-        notes=json.dumps(draft_notes),
+        db_session, app.id, ApplicationStatus.FORM_FILLED, notes=json.dumps(draft_notes)
     )
     db_session.commit()
 
-    # Mask worker out
+    # M1: mint server token
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     monkeypatch.setitem(sys.modules, "worker", None)
     monkeypatch.setitem(sys.modules, "worker.engine", None)
     monkeypatch.setitem(sys.modules, "worker.engine.filler", None)
@@ -157,7 +219,10 @@ def test_confirm_submit_http_tier_without_worker(client: TestClient, db_session,
             "status_code": 200,
         }
 
-        resp = client.post(f"/applications/{app.id}/confirm-submit", json=APPROVED_BODY)
+        resp = client.post(
+            f"/applications/{app.id}/confirm-submit",
+            json=_make_approval_body(token),
+        )
         assert resp.status_code == 200
         data = resp.json()
 

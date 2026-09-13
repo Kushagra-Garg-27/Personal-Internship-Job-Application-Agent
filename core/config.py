@@ -170,7 +170,27 @@ class Settings(BaseSettings):
     V1_TARGET_PLATFORM: str = "unstop"
     ACTIVE_PLATFORMS: list[str] = ["unstop"]
 
+    # ── M3: Submission API Access Guard ─────────────────────────────────
+    # When set to a non-empty string, the `POST request-approval-token` and
+    # `POST confirm-submit` endpoints require every request to include:
+    #   X-Submission-Secret: <this value>
+    # Comparison is constant-time. The value is never logged.
+    # Leave empty (default) to disable the guard — all requests pass through.
+    SUBMISSION_API_SECRET: str = ""
+
+    # ── M3: CORS allowed origins ──────────────────────────────────────────
+    # Explicit localhost origins for the frontend dev server.
+    # Overridable via environment variable (JSON list string).
+    # No wildcard — that was the original security gap.
+    CORS_ALLOW_ORIGINS: list[str] = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
 
 
 settings = Settings()

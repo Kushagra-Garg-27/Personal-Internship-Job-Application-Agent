@@ -1354,8 +1354,9 @@ class UnstopAdapter(BasePlatformAdapter):
         app_ctx : ApplicationContext
             Live context holding the filled, reviewed page.
         approval_token : str | None
-            Must equal ``HUMAN_SUBMISSION_APPROVAL_TOKEN``. Absent/incorrect
-            tokens raise before any browser interaction occurs.
+            Must be a server-issued approval token (≥32 chars, from
+            ``request-approval-token``). Short strings, None, and the former
+            static constant are rejected before any browser interaction.
 
         Returns
         -------
@@ -1363,12 +1364,12 @@ class UnstopAdapter(BasePlatformAdapter):
             ``{"success", "confirmed", "confirmation_ref", "detail", ...}``.
             ``success`` is True only when Unstop itself reported confirmation.
         """
-        from core.status import HUMAN_SUBMISSION_APPROVAL_TOKEN
+        from core.tokens import APPROVAL_TOKEN_MIN_LENGTH
 
-        if not (isinstance(approval_token, str) and approval_token == HUMAN_SUBMISSION_APPROVAL_TOKEN):
+        if not (isinstance(approval_token, str) and len(approval_token) >= APPROVAL_TOKEN_MIN_LENGTH):
             raise PermissionError(
-                "Unstop submit refused: explicit human approval token required. "
-                "ready_for_review is not approval."
+                "Unstop submit refused: a valid server-issued approval token (≥32 chars) is required. "
+                "ready_for_review, empty strings, and static constants are NOT approval."
             )
 
         page = app_ctx.browser_page

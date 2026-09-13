@@ -16,7 +16,8 @@ import pytest
 
 from core.models.opportunity import Application, Opportunity
 from core.services import opportunity_service
-from core.status import HUMAN_SUBMISSION_APPROVAL_TOKEN, OpportunityStatus
+from core.services.submission_service import issue_approval_token
+from core.status import OpportunityStatus
 from worker.adapters.base import SubmissionStatus
 from worker.adapters.greenhouse import GreenhouseAdapter
 from worker.engine.filler import ApplicationFiller
@@ -73,8 +74,12 @@ def test_ambiguous_timeout_checks_status_before_retry_success(db_session, ready_
             detail="Application found on platform.",
         )
 
+        # M1: issue server-side token before confirm_and_submit
+        token = issue_approval_token(db_session, app_id)
+        db_session.commit()
+
         sub_res = filler.confirm_and_submit(
-            db_session, app_id, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN
+            db_session, app_id, approval_token=token
         )
 
         assert sub_res["success"] is True
@@ -122,8 +127,12 @@ def test_ambiguous_timeout_fails_closed_when_not_confirmed(db_session, ready_opp
             detail="No application record found.",
         )
 
+        # M1: issue server-side token before confirm_and_submit
+        token = issue_approval_token(db_session, app.id)
+        db_session.commit()
+
         sub_res = filler.confirm_and_submit(
-            db_session, app.id, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN
+            db_session, app.id, approval_token=token
         )
 
         assert sub_res["success"] is False

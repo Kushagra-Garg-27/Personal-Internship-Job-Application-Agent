@@ -30,12 +30,11 @@ from core.models.profile import Profile
 from core.models.resume import Resume
 from core.services import application_service, opportunity_service
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
     ReliabilityTier,
-    is_human_approved,
 )
+from core.tokens import generate_approval_token, is_token_valid, make_token_expiry
 from worker.adapters.base import ApplicationContext
 from worker.adapters.unstop import (
     CHECK_FAILED,
@@ -530,14 +529,17 @@ def test_u4_submission_boundary_remains_fail_closed():
         tier=adapter.tier,
     )
 
-    # Any signal other than HUMAN_SUBMISSION_APPROVAL_TOKEN fails closed
+    # Any token shorter than 32 chars (including None, empty, static constant) fails closed
     for probe in [None, "", "ready_for_review", "valid", True, False, "HUMAN_CONFIRMED"]:
         with pytest.raises(PermissionError):
             adapter.submit_application(ctx, approval_token=probe)  # type: ignore[arg-type]
 
-    # Exactly HUMAN_SUBMISSION_APPROVAL_TOKEN is recognized by approval check
-    assert is_human_approved(HUMAN_SUBMISSION_APPROVAL_TOKEN) is True
-    assert is_human_approved("ready_for_review") is False
+    # M1: is_token_valid is the gate (not is_human_approved)
+    good = generate_approval_token()
+    exp = make_token_expiry()
+    assert is_token_valid(good, good, exp) is True
+    assert is_token_valid("HUMAN_CONFIRMED_SUBMIT", good, exp) is False
+    assert is_token_valid(None, good, exp) is False
 
 
 # ── 11. Unstop Authenticated Endpoint Probe Unit Tests ──────────────────────

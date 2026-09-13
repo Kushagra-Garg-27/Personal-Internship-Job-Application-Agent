@@ -1,4 +1,4 @@
-"""U4 offline tests for the Unstop human-approval submission gate.
+"""U4 / M1 offline tests for the Unstop human-approval submission gate.
 
 Covers the Phase 5 matrix without touching the real Unstop site:
 1. ``ready_for_review`` does not submit.
@@ -11,6 +11,8 @@ Covers the Phase 5 matrix without touching the real Unstop site:
 8. Fill-only execution cannot cross the submission boundary.
 
 Uses lightweight fake page doubles — no browser, no network, no credentials.
+M1: Adapter gate now checks ``len(token) >= 32`` instead of ``== HUMAN_CONFIRMED_SUBMIT``.
+     Service / filler gates validate DB-column tokens via ``is_token_valid()``.
 """
 
 from __future__ import annotations
@@ -20,13 +22,13 @@ import json
 import pytest
 
 from core.services import application_service, opportunity_service
+from core.services.submission_service import issue_approval_token
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
     SubmissionApprovalRequiredError,
-    is_human_approved,
 )
+from core.tokens import generate_approval_token, is_token_valid, make_token_expiry
 from worker.adapters.base import ApplicationContext
 from worker.adapters.unstop import UnstopAdapter
 from worker.engine.filler import ApplicationFiller
@@ -133,14 +135,21 @@ def _awaiting_unstop_app(db_session):
 # ── 1 & 8. ready_for_review / fill-only never submits ─────────────────────
 
 def test_ready_for_review_state_is_not_approval():
-    """Case 1+8: pre-submit states are data, never an approval signal."""
+    """Case 1+8: M1 is_token_valid rejects all non-token strings; old static constant rejected."""
+    from datetime import datetime, timedelta, timezone
+
+    good = generate_approval_token()
+    exp_future = make_token_expiry()
+
     for probe in ["ready_for_review", "FORM_FILLED", "form_filled",
                   "awaiting_submission", "AWAITING_SUBMISSION", "valid", "autofilled"]:
-        assert is_human_approved(probe) is False
-    assert is_human_approved(None) is False
-    assert is_human_approved("") is False
-    assert is_human_approved(True) is False  # type: ignore[arg-type]
-    assert is_human_approved(HUMAN_SUBMISSION_APPROVAL_TOKEN) is True
+        assert is_token_valid(probe, good, exp_future) is False
+    assert is_token_valid(None, good, exp_future) is False
+    assert is_token_valid("", good, exp_future) is False
+    # Old static constant is rejected (not == stored token)
+    assert is_token_valid("HUMAN_CONFIRMED_SUBMIT", good, exp_future) is False
+    # Valid case
+    assert is_token_valid(good, good, exp_future) is True
 
 
 def test_submit_application_without_token_raises_before_touching_browser():
@@ -157,12 +166,14 @@ def test_submit_application_without_token_raises_before_touching_browser():
 # ── 3 & 4 & 7. Approved submit observes real Unstop confirmation ──────────
 
 def test_approved_submit_clicks_once_and_reports_platform_confirmation():
-    """Cases 3+4+7: with approval, exactly one click; success comes from Unstop."""
+    """Cases 3+4+7: with a valid server-issued token, exactly one click; success from Unstop."""
     adapter = UnstopAdapter()
     page = _FakePage()
     ctx = _unstop_ctx(page)
 
-    result = adapter.submit_application(ctx, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN)
+    # M1: use a server-generated token (>= 32 chars) instead of static constant
+    token = generate_approval_token()
+    result = adapter.submit_application(ctx, approval_token=token)
 
     assert result["success"] is True
     assert result["confirmed"] is True
@@ -185,8 +196,8 @@ def test_approved_submit_without_platform_confirmation_reports_unconfirmed():
     _FakeElement.click = _no_nav_click
     try:
         ctx = _unstop_ctx(page)
-        # check_status sees /register URL -> not_submitted; wait loop expires.
-        result = adapter.submit_application(ctx, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN)
+        token = generate_approval_token()
+        result = adapter.submit_application(ctx, approval_token=token)
     finally:
         _FakeElement.click = orig_click
 
@@ -204,7 +215,8 @@ def test_submit_refuses_when_already_confirmed():
     page.confirmation_shown = True
     ctx = _unstop_ctx(page)
 
-    result = adapter.submit_application(ctx, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN)
+    token = generate_approval_token()
+    result = adapter.submit_application(ctx, approval_token=token)
 
     assert result["success"] is True
     assert result.get("already_confirmed") is True
@@ -212,13 +224,18 @@ def test_submit_refuses_when_already_confirmed():
 
 
 def test_confirm_and_submit_twice_refuses_second(db_session):
-    """Case 6: local status machine refuses a second submission of the same attempt."""
+    """Case 6: local status machine refuses a second submission of the same attempt (M1)."""
     opp, app = _awaiting_unstop_app(db_session)
+
+    # M1: issue server-side token
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     filler = ApplicationFiller()
     first = filler.confirm_and_submit(
         db_session,
         app.id,
-        approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN,
+        approval_token=token,
         platform_confirmed=True,
         confirmation_ref="UNSTOP-CONFIRMED-1753995",
         confirmation_detail="Unstop showed 'Successfully Registered'.",
@@ -229,7 +246,7 @@ def test_confirm_and_submit_twice_refuses_second(db_session):
         filler.confirm_and_submit(
             db_session,
             app.id,
-            approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN,
+            approval_token=token,
             platform_confirmed=True,
             confirmation_ref="UNSTOP-CONFIRMED-1753995",
         )
@@ -242,12 +259,16 @@ def test_confirm_and_submit_twice_refuses_second(db_session):
 # ── 4 & 5. Local status outcomes ──────────────────────────────────────────
 
 def test_confirmed_browser_submission_updates_local_status(db_session):
-    """Case 4: platform-confirmed -> Application SUBMITTED + Opportunity APPLIED."""
+    """Case 4: platform-confirmed -> Application SUBMITTED + Opportunity APPLIED (M1)."""
     opp, app = _awaiting_unstop_app(db_session)
+
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     result = ApplicationFiller().confirm_and_submit(
         db_session,
         app.id,
-        approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN,
+        approval_token=token,
         platform_confirmed=True,
         confirmation_ref="UNSTOP-CONFIRMED-1753995",
         confirmation_detail="Unstop showed 'Successfully Registered'.",
@@ -264,10 +285,14 @@ def test_confirmed_browser_submission_updates_local_status(db_session):
 
 
 def test_unconfirmed_browser_submission_keeps_review_state(db_session):
-    """Case 5: approved but unconfirmed -> stays FORM_FILLED / AWAITING_SUBMISSION."""
+    """Case 5: approved but unconfirmed -> stays FORM_FILLED / AWAITING_SUBMISSION (M1)."""
     opp, app = _awaiting_unstop_app(db_session)
+
+    token = issue_approval_token(db_session, app.id)
+    db_session.commit()
+
     result = ApplicationFiller().confirm_and_submit(
-        db_session, app.id, approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN
+        db_session, app.id, approval_token=token
     )
     assert result["success"] is False
     assert result["status"] == "unconfirmed"
@@ -281,11 +306,12 @@ def test_unconfirmed_browser_submission_keeps_review_state(db_session):
 # ── 2. Service + API gate ─────────────────────────────────────────────────
 
 def test_service_without_approval_token_fails_closed(db_session):
-    """Case 2: core service refuses without the token; nothing mutates."""
+    """Case 2: core service refuses without a valid DB-column token; nothing mutates (M1)."""
     from core.services import submission_service
 
     opp, app = _awaiting_unstop_app(db_session)
-    for probe in [None, "", "ready_for_review", "submitted", "Human approved"]:
+    # No token issued — all probes must raise
+    for probe in [None, "", "ready_for_review", "submitted", "Human approved", "HUMAN_CONFIRMED_SUBMIT"]:
         with pytest.raises(SubmissionApprovalRequiredError):
             submission_service.confirm_and_submit(db_session, app.id, approval_token=probe)
 
@@ -296,7 +322,7 @@ def test_service_without_approval_token_fails_closed(db_session):
 
 
 def test_api_requires_approval_token(client, db_session):
-    """Case 2: HTTP layer — missing token -> 422, wrong token -> 403, no mutation."""
+    """Case 2: HTTP layer — missing token -> 422, wrong token -> 403, no mutation (M1)."""
     opp, app = _awaiting_unstop_app(db_session)
 
     resp = client.post(f"/applications/{app.id}/confirm-submit", json={})

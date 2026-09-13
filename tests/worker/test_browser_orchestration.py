@@ -1,8 +1,9 @@
-"""Tests for the U7 Browser-Tier Submission Orchestrator and Concurrency Protection."""
+"""Tests for the U7 Browser-Tier Submission Orchestrator and Concurrency Protection (M1)."""
 
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,10 +11,10 @@ from sqlalchemy.orm import Session
 
 from core.models.opportunity import Application, Opportunity
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     ApplicationStatus,
     OpportunityStatus,
 )
+from core.tokens import generate_approval_token
 from worker.engine.filler import ApplicationFiller
 from worker.runner import WorkerRunner
 
@@ -21,12 +22,12 @@ from worker.runner import WorkerRunner
 def _create_awaiting_app(
     db_session: Session,
     dedup_suffix: str = "1",
-    approval_token: str | None = HUMAN_SUBMISSION_APPROVAL_TOKEN,
+    with_approval: bool = True,
     status: str = ApplicationStatus.FORM_FILLED.value,
     opp_status: str = OpportunityStatus.AWAITING_SUBMISSION.value,
     submission_claimed: bool = False,
 ) -> tuple[Opportunity, Application]:
-    """Helper to create a test opportunity and application record."""
+    """Helper: create an opportunity + application with M1 column-based approval state."""
     opp = Opportunity(
         dedup_hash=f"hash_browser_test_{dedup_suffix}",
         title="Software Engineer",
@@ -38,17 +39,26 @@ def _create_awaiting_app(
     db_session.add(opp)
     db_session.commit()
 
-    notes: dict = {"approved_by": "test_user"}
-    if approval_token is not None:
-        notes["approval_token"] = approval_token
-    if submission_claimed:
-        notes["submission_claimed"] = True
-        notes["claimed_by"] = "test_claim"
+    token = generate_approval_token() if with_approval else None
+    # Use naive UTC datetimes — SQLite stores naive, and SQLAlchemy's
+    # in-memory evaluator must compare like-for-like.
+    expires = (datetime.utcnow() + timedelta(minutes=30)) if with_approval else None
+    approved_at = datetime.utcnow() if with_approval else None
+    claimed_at = datetime.utcnow() if submission_claimed else None
+
 
     app = Application(
         opportunity_id=opp.id,
         status=status,
-        notes=json.dumps(notes),
+        notes=json.dumps({"approved_by": "test_user"}),
+        # M1 approval columns
+        approval_token=token,
+        approval_token_expires_at=expires,
+        approved_at=approved_at,
+        approved_by="test_user" if with_approval else None,
+        # M1 claim columns
+        submission_claimed_at=claimed_at,
+        claimed_by="test_claim" if submission_claimed else None,
     )
     db_session.add(app)
     db_session.commit()
@@ -56,7 +66,7 @@ def _create_awaiting_app(
 
 
 def test_poll_and_submit_queue_finds_and_claims_approved_apps(db_session: Session):
-    """WorkerRunner.poll_and_submit_queue claims and executes an approved application."""
+    """WorkerRunner.poll_and_submit_queue claims and executes an approved application (M1)."""
     opp, app = _create_awaiting_app(db_session, dedup_suffix="find_approved")
 
     filler_mock = MagicMock()
@@ -67,20 +77,19 @@ def test_poll_and_submit_queue_finds_and_claims_approved_apps(db_session: Sessio
 
     assert len(results) == 1
     assert results[0] == {"success": True}
-    filler_mock.execute_browser_submission.assert_called_once_with(
-        db_session, app.id, HUMAN_SUBMISSION_APPROVAL_TOKEN
-    )
+    # M1: no approval_token positional arg — worker reads from DB column
+    filler_mock.execute_browser_submission.assert_called_once_with(db_session, app.id)
 
     db_session.refresh(app)
-    notes = json.loads(app.notes)
-    assert notes["submission_claimed"] is True
-    assert notes["claimed_by"] == "worker_test"
+    # M1: claim stored in column, not notes JSON
+    assert app.submission_claimed_at is not None
+    assert app.claimed_by == "worker_test"
 
 
 def test_poll_and_submit_queue_ignores_unapproved(db_session: Session):
-    """Applications without a valid approval token are skipped and never claimed."""
+    """Applications without a valid approval token are skipped and never claimed (M1)."""
     opp, app = _create_awaiting_app(
-        db_session, dedup_suffix="unapproved", approval_token=None
+        db_session, dedup_suffix="unapproved", with_approval=False
     )
 
     filler_mock = MagicMock()
@@ -92,12 +101,11 @@ def test_poll_and_submit_queue_ignores_unapproved(db_session: Session):
     filler_mock.execute_browser_submission.assert_not_called()
 
     db_session.refresh(app)
-    notes = json.loads(app.notes)
-    assert not notes.get("submission_claimed")
+    assert app.submission_claimed_at is None
 
 
 def test_concurrency_two_workers_same_app_claim_exclusion(db_session: Session):
-    """Part 8.1: Two workers see the same approved application: Worker A claims, Worker B cannot."""
+    """Two workers see the same approved application: Worker A claims, Worker B cannot (M1)."""
     opp, app = _create_awaiting_app(db_session, dedup_suffix="concurrency_claim")
 
     runner_a = WorkerRunner()
@@ -114,13 +122,13 @@ def test_concurrency_two_workers_same_app_claim_exclusion(db_session: Session):
     assert claimed_b is False
 
     db_session.refresh(app)
-    notes = json.loads(app.notes)
-    assert notes["submission_claimed"] is True
-    assert notes["claimed_by"] == "worker_a"
+    # M1: claim state in column
+    assert app.submission_claimed_at is not None
+    assert app.claimed_by == "worker_a"
 
 
 def test_concurrency_only_claiming_worker_executes_submission(db_session: Session):
-    """Part 8.2: Only the worker that successfully claims can call execute_browser_submission()."""
+    """Only the worker that successfully claims can call execute_browser_submission() (M1)."""
     opp, app = _create_awaiting_app(db_session, dedup_suffix="concurrency_exec")
 
     filler_mock_a = MagicMock()
@@ -141,20 +149,18 @@ def test_concurrency_only_claiming_worker_executes_submission(db_session: Sessio
 
 
 def test_execute_browser_submission_requires_active_claim(db_session: Session):
-    """Calling execute_browser_submission on an unclaimed app raises RuntimeError."""
+    """Calling execute_browser_submission on an unclaimed app raises RuntimeError (M1)."""
     opp, app = _create_awaiting_app(
         db_session, dedup_suffix="unclaimed_exec", submission_claimed=False
     )
 
     filler = ApplicationFiller()
     with pytest.raises(RuntimeError, match="must be claimed"):
-        filler.execute_browser_submission(
-            db_session, app.id, HUMAN_SUBMISSION_APPROVAL_TOKEN
-        )
+        filler.execute_browser_submission(db_session, app.id)
 
 
 def test_second_polling_cycle_skips_active_claim(db_session: Session):
-    """Part 8.3: A second polling cycle cannot submit while the first claim is active."""
+    """A second polling cycle cannot submit while the first claim is active (M1)."""
     opp, app = _create_awaiting_app(
         db_session, dedup_suffix="active_claim", submission_claimed=True
     )
@@ -168,7 +174,7 @@ def test_second_polling_cycle_skips_active_claim(db_session: Session):
 
 
 def test_already_submitted_application_skipped(db_session: Session):
-    """Part 8.4: Already-submitted applications are skipped and cannot be claimed."""
+    """Already-submitted applications are skipped and cannot be claimed (M1)."""
     opp, app = _create_awaiting_app(
         db_session,
         dedup_suffix="already_sub",
@@ -185,7 +191,7 @@ def test_already_submitted_application_skipped(db_session: Session):
 
 
 def test_ambiguous_submission_not_automatically_eligible(db_session: Session):
-    """Part 8.5: Ambiguous submission transitions to manual_required and is NOT re-submitted."""
+    """Ambiguous submission transitions to manual_required and is NOT re-submitted (M1)."""
     opp, app = _create_awaiting_app(db_session, dedup_suffix="ambig_fail")
 
     runner = WorkerRunner()
@@ -203,9 +209,7 @@ def test_ambiguous_submission_not_automatically_eligible(db_session: Session):
     with patch("worker.engine.filler.resolve_adapter", return_value=mock_adapter):
         with patch.object(filler, "process_opportunity") as mock_process:
             mock_process.return_value = {"success": True, "app_ctx": MagicMock()}
-            result = filler.execute_browser_submission(
-                db_session, app.id, HUMAN_SUBMISSION_APPROVAL_TOKEN
-            )
+            result = filler.execute_browser_submission(db_session, app.id)
 
     assert result["success"] is False
     assert result["status"] == "manual_required"
@@ -223,13 +227,13 @@ def test_ambiguous_submission_not_automatically_eligible(db_session: Session):
     assert runner.claim_application_for_submission(db_session, app.id) is False
 
 
-def test_invalid_or_missing_approval_token_fails_closed(db_session: Session):
-    """Part 8.6: Invalid/missing approval token results in no claim and no submission."""
-    for bad_token in [None, "", "INVALID_TOKEN", "ready_for_review", "autofilled"]:
+def test_invalid_or_missing_approval_results_in_no_claim(db_session: Session):
+    """M1: Applications with no DB-column approval (no approved_at) are never claimed."""
+    for suffix in ["no_token_1", "no_token_2", "no_token_3"]:
         opp, app = _create_awaiting_app(
             db_session,
-            dedup_suffix=f"bad_tok_{id(bad_token)}",
-            approval_token=bad_token,
+            dedup_suffix=suffix,
+            with_approval=False,
         )
         runner = WorkerRunner()
         assert runner.claim_application_for_submission(db_session, app.id) is False
@@ -237,7 +241,7 @@ def test_invalid_or_missing_approval_token_fails_closed(db_session: Session):
 
 @patch("worker.engine.filler.resolve_adapter")
 def test_execute_browser_submission_success(mock_resolve_adapter, db_session: Session):
-    """execute_browser_submission correctly coordinates a successful submission with claim."""
+    """execute_browser_submission correctly coordinates a successful submission (M1)."""
     opp, app = _create_awaiting_app(
         db_session, dedup_suffix="success_flow", submission_claimed=True
     )
@@ -256,9 +260,7 @@ def test_execute_browser_submission_success(mock_resolve_adapter, db_session: Se
     with patch.object(filler, "process_opportunity") as mock_process:
         mock_process.return_value = {"success": True, "app_ctx": MagicMock()}
 
-        result = filler.execute_browser_submission(
-            db_session, app.id, HUMAN_SUBMISSION_APPROVAL_TOKEN
-        )
+        result = filler.execute_browser_submission(db_session, app.id)
 
     assert result["success"] is True
     assert result["status"] == "applied"
@@ -278,7 +280,7 @@ def test_execute_browser_submission_success(mock_resolve_adapter, db_session: Se
 def test_execute_browser_submission_ambiguous_failure(
     mock_resolve_adapter, db_session: Session
 ):
-    """Ambiguous failures safely transition to manual resolution without retrying."""
+    """Ambiguous failures safely transition to manual resolution without retrying (M1)."""
     opp, app = _create_awaiting_app(
         db_session, dedup_suffix="ambig_flow", submission_claimed=True
     )
@@ -295,9 +297,7 @@ def test_execute_browser_submission_ambiguous_failure(
     with patch.object(filler, "process_opportunity") as mock_process:
         mock_process.return_value = {"success": True, "app_ctx": MagicMock()}
 
-        result = filler.execute_browser_submission(
-            db_session, app.id, HUMAN_SUBMISSION_APPROVAL_TOKEN
-        )
+        result = filler.execute_browser_submission(db_session, app.id)
 
     assert result["success"] is False
     assert result["status"] == "manual_required"

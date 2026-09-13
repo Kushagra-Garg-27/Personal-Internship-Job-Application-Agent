@@ -32,7 +32,8 @@ from core.models.resume import Resume
 from core.models.scoring import ScoringVerdict
 from core.notifications.worker_watcher import poll_worker_events
 from core.services import approval_service, opportunity_service
-from core.status import HUMAN_SUBMISSION_APPROVAL_TOKEN, OpportunityStatus
+from core.services.submission_service import issue_approval_token
+from core.status import OpportunityStatus
 from worker.adapters.greenhouse import GreenhouseAdapter
 from worker.engine.filler import ApplicationFiller
 
@@ -217,10 +218,14 @@ def test_full_pipeline_end_to_end(db_session, staging_profile):
             "status_code": 200,
         }
 
+        # M1: issue server-side token before confirm_and_submit
+        token = issue_approval_token(db_session, application_attempt.id)
+        db_session.commit()
+
         submit_result = filler.confirm_and_submit(
             db_session,
             application_attempt.id,
-            approval_token=HUMAN_SUBMISSION_APPROVAL_TOKEN,
+            approval_token=token,
         )
         assert submit_result["success"] is True
         assert submit_result["status"] == "applied"

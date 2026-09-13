@@ -273,9 +273,17 @@ export interface TestNotificationResponse {
   channel_degraded_alert_sent: boolean;
 }
 
-// ── U4 Human Submission Review & Confirmation Gate ─────────────────────────
+// ── U4 / M1 Human Submission Review & Confirmation Gate ────────────────
+// In M1 the static approval constant was removed. The approval token is now
+// a server-issued UUID obtained from POST /applications/{id}/request-approval-token.
 
-export const HUMAN_SUBMISSION_APPROVAL_TOKEN = 'HUMAN_CONFIRMED_SUBMIT';
+/** Response from POST /applications/{id}/request-approval-token */
+export interface ApprovalTokenResponse {
+  /** Server-issued UUID to echo back in confirm-submit */
+  token: string;
+  /** ISO-8601 UTC expiry time (30-minute TTL) */
+  expires_at: string;
+}
 
 export type ApplicationStatus = 'pending' | 'form_filled' | 'submitted' | 'failed';
 
@@ -310,6 +318,10 @@ export interface ApplicationResponse {
   updated_at: string;
 }
 
+/**
+ * Payload for POST /applications/{id}/confirm-submit.
+ * approval_token must be the server-issued UUID from request-approval-token.
+ */
 export interface ConfirmSubmitRequest {
   approval_token: string;
   approved_by?: string;

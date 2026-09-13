@@ -24,8 +24,8 @@ from core.status import (
     OpportunityStatus,
     ReliabilityTier,
     SubmissionApprovalRequiredError,
-    is_human_approved,
 )
+from core.tokens import is_token_valid
 from worker.adapters.base import BasePlatformAdapter, FillResult, SubmissionStatus
 from worker.adapters.registry import (
     DiscoveryOnlyRejectionError,
@@ -331,21 +331,21 @@ class ApplicationFiller:
         """Human confirmation action to execute submission for stable HTTP adapters.
         Handles ambiguous timeouts by verifying status before retry.
 
-        Requires an explicit human approval token
-        (``HUMAN_SUBMISSION_APPROVAL_TOKEN``). Every other signal — awaiting_submission,
-        a valid form, a successful fill, prior instructions, test execution, timeouts,
+        Requires a valid, non-expired server-issued approval token stored in
+        ``applications.approval_token`` (set by ``issue_approval_token()``).
+        Every other signal — status, autofill success, form validity, timeouts,
         defaults, or agent assumptions — fails closed.
         """
-        # ── Human approval gate (fail closed) ─────────────────────────
-        if not is_human_approved(approval_token):
-            raise SubmissionApprovalRequiredError(
-                f"Application {application_id} submission blocked: no explicit human approval token. "
-                "Form-filled/awaiting-submission state is NOT approval."
-            )
-
         app = session.get(Application, application_id)
         if app is None:
             raise ValueError(f"Application {application_id} not found.")
+
+        # ── M1: DB-column token validation (fail closed) ─────────────────
+        if not is_token_valid(approval_token, app.approval_token, app.approval_token_expires_at):
+            raise SubmissionApprovalRequiredError(
+                f"Application {application_id} submission blocked: token invalid, expired, or "
+                "not yet issued."
+            )
 
         # ── Duplicate submission protection ───────────────────────────
         if app.status == ApplicationStatus.SUBMITTED.value:
@@ -559,23 +559,19 @@ class ApplicationFiller:
             "submitted_at": now.isoformat(),
         }
 
-    def execute_browser_submission(self, session: Session, application_id: int, approval_token: str) -> dict[str, Any]:
+    def execute_browser_submission(self, session: Session, application_id: int) -> dict[str, Any]:
         """Orchestrate the autonomous browser submission for an explicitly approved application.
-        
-        This securely bridges the human approval gate to the actual Playwright browser execution.
+
+        The application must have been claimed (``submission_claimed_at IS NOT NULL``) before
+        calling this method.  Approval was already validated by the claim step (M1).
         """
-        import json
-        from pathlib import Path
-        from core.status import HUMAN_SUBMISSION_APPROVAL_TOKEN, ApplicationStatus, OpportunityStatus
-        from core.models.opportunity import Opportunity, Application
-        from datetime import datetime, timezone
-
-        if not isinstance(approval_token, str) or approval_token != HUMAN_SUBMISSION_APPROVAL_TOKEN:
-            raise PermissionError("execute_browser_submission requires valid human approval token")
-
         app = session.get(Application, application_id)
         if app is None:
             raise ValueError(f"Application {application_id} not found.")
+
+        # M1: Check DB claim column instead of static token
+        if app.submission_claimed_at is None:
+            raise RuntimeError(f"Application #{app.id} must be claimed before executing browser submission")
 
         if app.status == ApplicationStatus.SUBMITTED.value:
             return {"success": True, "already_submitted": True}
@@ -597,8 +593,7 @@ class ApplicationFiller:
             except Exception:
                 pass
 
-        if not notes_data.get("submission_claimed"):
-            raise RuntimeError(f"Application #{app.id} must be claimed before executing browser submission")
+        # (claim was already validated above via submission_claimed_at)
 
         if self.adapter_override is not None:
             adapter = self.adapter_override
@@ -621,7 +616,8 @@ class ApplicationFiller:
                  return {"success": False, "error": "No ApplicationContext available from fill"}
 
             # 2. Execute the actual click and verify confirmation
-            submit_res = adapter.submit_application(app_ctx, approval_token=approval_token)
+            # Pass app.approval_token (server-issued UUID) as the execution ticket
+            submit_res = adapter.submit_application(app_ctx, approval_token=app.approval_token)
             
             if not submit_res.get("success"):
                 # AMBIGUOUS TIMEOUT / FAILURE - FAIL CLOSED

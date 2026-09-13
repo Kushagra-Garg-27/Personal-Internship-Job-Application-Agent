@@ -1,4 +1,4 @@
-"""Application submission execution service (Phase 9 & 10).
+"""Application submission execution service (Phase 9, 10, M1).
 
 Provides self-contained submission execution and confirmation logic for Core,
 ensuring zero import-time or call-time dependency on `worker.*`.
@@ -6,16 +6,14 @@ ensuring zero import-time or call-time dependency on `worker.*`.
 Handles:
 - Stable HTTP tier (Greenhouse, Lever): Executes authorized HTTP POST submissions
   and ambiguous-timeout recovery status checks.
-- Experimental Browser tier (Internshala, Unstop): Confirms that the candidate has
-  physically clicked Submit in the open browser window and transitions database state.
+- Experimental Browser tier (Internshala, Unstop): Records human approval and
+  delegates autonomous Playwright execution to the background worker.
 
-HARD INVARIANT (Unstop V1 - U4):
+M1 APPROVAL INVARIANT:
     Every write path that crosses the irreversible submission boundary requires
-    the caller to supply an explicit human approval token
-    (`HUMAN_SUBMISSION_APPROVAL_TOKEN`). Reaching a pre-submit state
-    (`ready_for_review`, `awaiting_submission`, `form_filled`), a valid form, a
-    successful autofill, a prior instruction, a test run, a timeout, a default
-    value, or any agent assumption is NEVER approval.
+    a valid, non-expired server-issued approval token stored in the Application
+    record (``applications.approved_at IS NOT NULL``).  Status, form validity,
+    autofill success, timeouts, defaults, and agent assumptions are NEVER approval.
 """
 
 from __future__ import annotations
@@ -36,7 +34,11 @@ from core.status import (
     OpportunityStatus,
     ReliabilityTier,
     SubmissionApprovalRequiredError,
-    is_human_approved,
+)
+from core.tokens import (
+    generate_approval_token,
+    is_token_valid,
+    make_token_expiry,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,6 +174,57 @@ def check_lever_status(
             http_client.close()
 
 
+def issue_approval_token(session: Session, application_id: int) -> str:
+    """Mint and store a server-side approval token for the given application.
+
+    Generates a cryptographically secure URL-safe token, stores it in
+    ``applications.approval_token`` + ``applications.approval_token_expires_at``
+    (30-minute TTL), and resets ``approved_at`` so that a fresh confirmation
+    round-trip is always required.
+
+    Parameters
+    ----------
+    session : Session
+        SQLAlchemy database session (caller is responsible for commit).
+    application_id : int
+        ID of the application for which to mint a token.
+
+    Returns
+    -------
+    str
+        The newly generated token value for the client to echo back in
+        ``confirm-submit``.
+
+    Raises
+    ------
+    ValueError
+        If the application does not exist or is not in a pre-submit status.
+    """
+    app = session.get(Application, application_id)
+    if app is None:
+        raise ValueError(f"Application {application_id} not found.")
+    if app.status not in {
+        ApplicationStatus.FORM_FILLED.value,
+        ApplicationStatus.PENDING.value,
+    }:
+        raise ValueError(
+            f"Cannot issue approval token for application in status {app.status!r}; "
+            "must be 'form_filled' or 'pending'."
+        )
+
+    token = generate_approval_token()
+    app.approval_token = token
+    app.approval_token_expires_at = make_token_expiry()
+    app.approved_at = None  # Reset: fresh confirmation required
+    session.flush()
+    logger.info(
+        "Approval token issued for application #%d (expires %s).",
+        application_id,
+        app.approval_token_expires_at.isoformat(),
+    )
+    return token
+
+
 def confirm_and_submit(
     session: Session,
     application_id: int,
@@ -183,7 +236,7 @@ def confirm_and_submit(
     confirmation_detail: str | None = None,
     http_client: httpx.Client | None = None,
 ) -> dict[str, Any]:
-    """Human confirmation action to execute submission or confirm physical browser submission.
+    """Human confirmation action to execute or queue submission.
 
     Parameters
     ----------
@@ -192,16 +245,14 @@ def confirm_and_submit(
     application_id : int
         ID of the application being confirmed.
     approval_token : str | None
-        REQUIRED. Must equal ``HUMAN_SUBMISSION_APPROVAL_TOKEN``. This is the
-        only accepted proof of explicit human approval; the absence of a token
-        fails closed.
+        REQUIRED.  Must match the server-issued token stored in
+        ``applications.approval_token`` and must not be expired.  The
+        absence of a valid token fails closed.
     approval_actor : str
         Audit label for the approving human actor.
     platform_confirmed : bool
-        For the Experimental browser tier: ``True`` only when the platform
-        itself was observed to report the submission as received. A missing
-        platform confirmation leaves the application in its pre-submit review
-        state instead of writing a false ``submitted`` status.
+        Deprecated/unused for the browser tier (worker handles confirmation).
+        Kept for API compatibility.
     confirmation_ref : str | None
         Platform-reported confirmation reference, when available.
     confirmation_detail : str | None
@@ -217,22 +268,21 @@ def confirm_and_submit(
     Raises
     ------
     SubmissionApprovalRequiredError
-        If no valid explicit human approval token was supplied.
+        If no valid server-issued approval token was supplied.
     ValueError
         If application or opportunity not found, opportunity is not
         awaiting_submission, or the application is already submitted.
     """
-    # ── Human approval gate (fail closed) ─────────────────────────────
-    if not is_human_approved(approval_token):
-        raise SubmissionApprovalRequiredError(
-            f"Application {application_id} submission blocked: no explicit human approval token. "
-            "ready_for_review, a valid form, successful autofill, prior instructions, test "
-            "execution, timeouts, defaults, and agent assumptions are NOT approval."
-        )
-
     app = session.get(Application, application_id)
     if app is None:
         raise ValueError(f"Application {application_id} not found.")
+
+    # ── M1: DB-column token validation (fail closed) ───────────────────
+    if not is_token_valid(approval_token, app.approval_token, app.approval_token_expires_at):
+        raise SubmissionApprovalRequiredError(
+            f"Application {application_id} submission blocked: token invalid, expired, or "
+            "not yet issued. Call request-approval-token first."
+        )
 
     # ── Duplicate submission protection ───────────────────────────────
     if app.status == ApplicationStatus.SUBMITTED.value:
@@ -284,20 +334,20 @@ def confirm_and_submit(
     # (AWAITING_SUBMISSION / FORM_FILLED). The background browser worker will
     # pick it up and execute the autonomous Playwright submission.
     if is_browser_tier:
-        details = {
-            **(notes_data or {}),
-            "approval_token": approval_token,
-            "approved_by": approval_actor,
-            "submission_requested_at": datetime.now(timezone.utc).isoformat()
-        }
-        application_service.update_application_status(
-            session,
-            app.id,
-            status=app.status,
-            notes=json.dumps(details, default=str),
-        )
+        # Record approval in dedicated columns (M1) — no longer stored in notes.
+        now = datetime.now(timezone.utc)
+        app.approved_by = approval_actor
+        app.approved_at = now
+        # M1 single-use: consume the token so it cannot be replayed.
+        app.approval_token = None
+        app.approval_token_expires_at = None
+        session.flush()
         session.commit()
-        logger.info("Application #%d approved for browser-tier submission. Worker will execute.", app.id)
+        logger.info(
+            "Application #%d approved for browser-tier submission (actor=%r). Worker will execute.",
+            app.id,
+            approval_actor,
+        )
         return {
             "success": True,
             "status": "approved_for_submission",

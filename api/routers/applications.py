@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from api.deps import get_db
+from api.guards import require_submission_secret
 from core.repositories import application_repo, opportunity_repo
 from core.schemas.opportunity import (
     ApplicationCreate,
@@ -15,7 +16,6 @@ from core.schemas.opportunity import (
 )
 from core.services import application_service, opportunity_service
 from core.status import (
-    HUMAN_SUBMISSION_APPROVAL_TOKEN,
     InvalidApplicationTransitionError,
     SubmissionApprovalRequiredError,
 )
@@ -23,20 +23,26 @@ from core.status import (
 router = APIRouter(tags=["applications"])
 
 
+class ApprovalTokenResponse(BaseModel):
+    """Response from the request-approval-token endpoint."""
+
+    token: str = Field(description="Server-issued approval token to echo back in confirm-submit.")
+    expires_at: str = Field(description="ISO-8601 UTC expiry time of the token (30-minute TTL).")
+
+
 class ConfirmSubmitRequest(BaseModel):
     """Explicit human confirmation payload for the irreversible submission boundary.
 
-    ``approval_token`` has NO default. Omitting it, or sending anything other
-    than the exact human confirmation token, is rejected — the pre-submit state
-    itself is never treated as approval.
+    ``approval_token`` has NO default. It must be the server-issued UUID returned
+    by ``POST /applications/{id}/request-approval-token``. Any other value is
+    rejected — the pre-submit state itself is never treated as approval.
     """
 
     approval_token: str = Field(
         ...,
         description=(
-            "Explicit human approval token. Must be exactly "
-            f"{HUMAN_SUBMISSION_APPROVAL_TOKEN!r}. Requested by a human who reviewed the "
-            "filled form; never inferred from status, autofill success, timeouts, or defaults."
+            "Server-issued approval token obtained from request-approval-token. "
+            "Must match the token stored for this application and must not be expired."
         ),
     )
     approved_by: str = Field(
@@ -45,15 +51,11 @@ class ConfirmSubmitRequest(BaseModel):
     )
     platform_confirmed: bool = Field(
         default=False,
-        description=(
-            "Browser-tier only: True when the platform itself was observed to report the "
-            "submission as received. Without it the application stays in its pre-submit "
-            "review state rather than being marked submitted."
-        ),
+        description="Deprecated/unused for browser tier. Kept for API compatibility.",
     )
     confirmation_ref: str | None = Field(
         default=None,
-        description="Platform-reported confirmation reference, when available (secrets must be redacted).",
+        description="Platform-reported confirmation reference, when available.",
     )
     confirmation_detail: str | None = Field(
         default=None,
@@ -136,25 +138,53 @@ def update_application(
 
 
 @router.post(
+    "/applications/{application_id}/request-approval-token",
+    response_model=ApprovalTokenResponse,
+    dependencies=[Depends(require_submission_secret)],
+)
+def request_approval_token(
+    application_id: int,
+    db: Session = Depends(get_db),
+):
+    """Mint a single-use, time-boxed server-side approval token (M1).
+
+    Stores the generated UUID in ``applications.approval_token`` (30-minute TTL).
+    The client must echo this token back in ``confirm-submit``.  A new call
+    invalidates any previously issued token for the same application.
+    """
+    from core.services import submission_service
+
+    try:
+        token = submission_service.issue_approval_token(db, application_id)
+        db.commit()
+        app = db.get(submission_service.Application, application_id)
+        expires_at = app.approval_token_expires_at.isoformat() if app and app.approval_token_expires_at else ""
+        return ApprovalTokenResponse(token=token, expires_at=expires_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
     "/applications/{application_id}/confirm-submit",
     response_model=dict,
+    dependencies=[Depends(require_submission_secret)],
 )
 def confirm_submit_application(
     application_id: int,
     body: ConfirmSubmitRequest,
     db: Session = Depends(get_db),
 ):
-    """Explicit human confirmation action that finalizes an application submission (Phase 9).
+    """Explicit human confirmation action that finalizes an application submission (M1).
 
-    This is the ONLY route that may cross the irreversible submission boundary, and
-    it requires ``body.approval_token`` to equal the exact human approval token.
-    ``ready_for_review``, a valid form, successful autofill, prior instructions,
-    test execution, timeouts, default values, and agent assumptions are NOT approval.
+    Requires ``body.approval_token`` to be the server-issued UUID from
+    ``request-approval-token``. The token must match the DB record and must
+    not be expired. No other signal — status, autofill success, form validity,
+    timeouts, defaults, or agent assumptions — is ever treated as approval.
 
-    - For Stable HTTP tier (Greenhouse/Lever): Authorizes and executes the pending
+    - Stable HTTP tier (Greenhouse/Lever): Authorizes and executes the pending
       draft HTTP submission to the platform API.
-    - For Experimental browser tier (Internshala/Unstop): Records the submission only
-      when the platform itself confirmed receipt (``platform_confirmed=true``).
+    - Experimental browser tier (Internshala/Unstop): Records the approval in
+      dedicated columns; background worker performs the Playwright submission.
     """
     from core.services import submission_service
 
@@ -173,4 +203,3 @@ def confirm_submit_application(
         raise HTTPException(status_code=403, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-

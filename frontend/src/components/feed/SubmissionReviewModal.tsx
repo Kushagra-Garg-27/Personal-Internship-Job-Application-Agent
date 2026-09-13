@@ -18,7 +18,6 @@ import type {
   ApplicationNotesData,
   ConfirmSubmitResponse,
 } from '../../types';
-import { HUMAN_SUBMISSION_APPROVAL_TOKEN } from '../../types';
 import { api } from '../../api/client';
 import { ReliabilityBadge, StatusBadge } from '../common/Badge';
 
@@ -121,10 +120,15 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
     setSubmitError(null);
 
     try {
+      // M1 Phase 1: Request a server-issued, time-boxed approval token.
+      const tokenRes = await api.requestApprovalToken(application.id);
+
+      // M1 Phase 2: Echo the server-issued token back in confirm-submit.
+      // platform_confirmed is derived from the checkbox state — never hardcoded.
       const res = await api.confirmSubmitApplication(application.id, {
-        approval_token: HUMAN_SUBMISSION_APPROVAL_TOKEN,
+        approval_token: tokenRes.token,
         approved_by: 'human_user',
-        platform_confirmed: true,
+        platform_confirmed: confirmedCheckbox,
         confirmation_detail: 'Human confirmed submission via review UI',
       });
 
