@@ -41,8 +41,9 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
   const [confirmedCheckbox, setConfirmedCheckbox] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [guardMode, setGuardMode] = useState<'required' | 'disabled'>('required');
 
-  // Fetch application attempts when modal opens
+  // Fetch application attempts and guard status when modal opens
   useEffect(() => {
     if (!isOpen || !opportunity) {
       setApplication(null);
@@ -50,6 +51,7 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
       setConfirmedCheckbox(false);
       setSubmitting(false);
       setSubmitError(null);
+      setGuardMode('required');
       return;
     }
 
@@ -58,6 +60,17 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
     setFetchError(null);
     setConfirmedCheckbox(false);
     setSubmitError(null);
+    setGuardMode('required');
+
+    // Fetch guard status (M3.1)
+    api
+      .getGuardStatus()
+      .then((statusRes) => {
+        if (isMounted) setGuardMode(statusRes.mode);
+      })
+      .catch(() => {
+        if (isMounted) setGuardMode('required');
+      });
 
     api
       .listApplications(opportunity.id)
@@ -653,8 +666,74 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
             </div>
           )}
 
-          {/* Irreversible Boundary & Confirmation Checkbox */}
-          {!isAlreadySubmitted && application && (
+          {/* M3.1 Guard Active: Privileged CLI Guidance */}
+          {!isAlreadySubmitted && application && guardMode === 'required' && (
+            <div
+              data-testid="m3-guarded-notice"
+              style={{
+                padding: '16px 20px',
+                borderRadius: 'var(--radius-lg)',
+                background: 'rgba(234, 179, 8, 0.08)',
+                border: '1px solid rgba(234, 179, 8, 0.28)',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '12px',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                  fontSize: '0.88rem',
+                  fontWeight: 600,
+                  color: '#facc15',
+                }}
+              >
+                <Lock size={16} />
+                <span>Privileged Local Approval Channel Required</span>
+              </div>
+              <p
+                style={{
+                  fontSize: '0.82rem',
+                  color: 'var(--text-secondary)',
+                  margin: 0,
+                  lineHeight: 1.5,
+                }}
+              >
+                Submission guard is active. Direct browser dashboard submission is restricted.
+                Complete human authorization using the privileged local approval command:
+              </p>
+              <div
+                style={{
+                  padding: '9px 14px',
+                  background: 'rgba(0, 0, 0, 0.45)',
+                  borderRadius: 'var(--radius-md)',
+                  fontFamily: 'monospace',
+                  fontSize: '0.84rem',
+                  color: '#38bdf8',
+                  border: '1px solid var(--border-subtle)',
+                  userSelect: 'all',
+                }}
+              >
+                python scripts/approve_submission.py --application-id {application.id}
+              </div>
+              <p
+                style={{
+                  fontSize: '0.75rem',
+                  color: 'var(--text-muted)',
+                  margin: 0,
+                  lineHeight: 1.4,
+                }}
+              >
+                The CLI tool prompts for your submission secret via environment or secure prompt, reviews
+                application details, and performs two-phase authorization.
+              </p>
+            </div>
+          )}
+
+          {/* Irreversible Boundary & Confirmation Checkbox (Disabled / Dev mode) */}
+          {!isAlreadySubmitted && application && guardMode !== 'required' && (
             <div
               style={{
                 padding: '16px 20px',
@@ -769,7 +848,7 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
             Cancel
           </button>
 
-          {!isAlreadySubmitted ? (
+          {!isAlreadySubmitted && guardMode !== 'required' ? (
             <button
               onClick={handleConfirmSubmit}
               disabled={submitting || !confirmedCheckbox || !application}
@@ -819,9 +898,9 @@ export const SubmissionReviewModal: React.FC<SubmissionReviewModalProps> = ({
                 borderRadius: 'var(--radius-md)',
                 fontSize: '0.82rem',
                 fontWeight: 600,
-                color: 'var(--emerald-400)',
-                background: 'rgba(16, 185, 129, 0.1)',
-                border: '1px solid rgba(16, 185, 129, 0.3)',
+                color: isAlreadySubmitted ? 'var(--emerald-400)' : 'var(--text-primary)',
+                background: isAlreadySubmitted ? 'rgba(16, 185, 129, 0.1)' : 'rgba(255, 255, 255, 0.08)',
+                border: isAlreadySubmitted ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid var(--border-subtle)',
                 cursor: 'pointer',
               }}
             >

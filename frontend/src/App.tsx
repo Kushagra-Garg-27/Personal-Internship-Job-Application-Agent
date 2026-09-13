@@ -6,6 +6,7 @@ import { ScamQueuePage } from './pages/ScamQueuePage';
 import { ResponseCenterPage } from './pages/ResponseCenterPage';
 import { NotificationSettingsPage } from './pages/NotificationSettingsPage';
 import { ProfilePage } from './pages/ProfilePage';
+import { SubmissionQueuePage } from './pages/SubmissionQueuePage';
 
 export const App: React.FC = () => {
   return (
@@ -15,6 +16,7 @@ export const App: React.FC = () => {
           <Route index element={<FeedPage />} />
           <Route path="scam-review" element={<ScamQueuePage />} />
           <Route path="responses" element={<ResponseCenterPage />} />
+          <Route path="submission-queue" element={<SubmissionQueuePage />} />
           <Route path="notifications" element={<NotificationSettingsPage />} />
           <Route path="profile" element={<ProfilePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />

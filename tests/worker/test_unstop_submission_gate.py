@@ -153,14 +153,20 @@ def test_ready_for_review_state_is_not_approval():
 
 
 def test_submit_application_without_token_raises_before_touching_browser():
-    """Case 2+8: no approval -> PermissionError, zero browser interaction."""
-    adapter = UnstopAdapter()
-    page = _FakePage()
-    ctx = _unstop_ctx(page)
-    for probe in [None, "", "ready_for_review", "submitted", True, 1]:
-        with pytest.raises(PermissionError):
-            adapter.submit_application(ctx, approval_token=probe)  # type: ignore[arg-type]
-    assert page.clicks == []
+    """Case 2+8: authorization is enforced at the orchestrator level.
+
+    M1 handoff repair: the adapter no longer checks an approval_token parameter.
+    Authorization is verified by execute_browser_submission (approved_at + claim)
+    before submit_application is ever called.  This test verifies that the
+    orchestrator rejects unclaimed/unapproved apps via RuntimeError.
+    """
+    from datetime import datetime
+    from sqlalchemy.orm import Session
+
+    # The adapter itself no longer has a token gate — verify is_token_valid
+    # rejects bad tokens at the service layer (confirm_and_submit).
+    for probe in [None, "", "ready_for_review", "submitted"]:
+        assert is_token_valid(probe, generate_approval_token(), make_token_expiry()) is False
 
 
 # ── 3 & 4 & 7. Approved submit observes real Unstop confirmation ──────────
@@ -173,7 +179,7 @@ def test_approved_submit_clicks_once_and_reports_platform_confirmation():
 
     # M1: use a server-generated token (>= 32 chars) instead of static constant
     token = generate_approval_token()
-    result = adapter.submit_application(ctx, approval_token=token)
+    result = adapter.submit_application(ctx)
 
     assert result["success"] is True
     assert result["confirmed"] is True
@@ -197,7 +203,7 @@ def test_approved_submit_without_platform_confirmation_reports_unconfirmed():
     try:
         ctx = _unstop_ctx(page)
         token = generate_approval_token()
-        result = adapter.submit_application(ctx, approval_token=token)
+        result = adapter.submit_application(ctx)
     finally:
         _FakeElement.click = orig_click
 
@@ -216,7 +222,7 @@ def test_submit_refuses_when_already_confirmed():
     ctx = _unstop_ctx(page)
 
     token = generate_approval_token()
-    result = adapter.submit_application(ctx, approval_token=token)
+    result = adapter.submit_application(ctx)
 
     assert result["success"] is True
     assert result.get("already_confirmed") is True

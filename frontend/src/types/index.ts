@@ -316,6 +316,15 @@ export interface ApplicationResponse {
   notes?: string | null;
   created_at: string;
   updated_at: string;
+  // M1 approval fields
+  approved_at?: string | null;
+  approved_by?: string | null;
+  submission_claimed_at?: string | null;
+  claimed_by?: string | null;
+  // M5 revocation fields
+  approval_revoked_at?: string | null;
+  approval_revoked_by?: string | null;
+  approval_revocation_reason?: string | null;
 }
 
 /**
@@ -342,3 +351,35 @@ export interface ConfirmSubmitResponse {
   error?: string;
 }
 
+// ── M5: Pending queue & revocation ────────────────────────────────────────
+
+export interface PendingQueueItem {
+  application_id: number;
+  opportunity_id: number;
+  opportunity_title?: string | null;
+  opportunity_company?: string | null;
+  opportunity_url?: string | null;
+  application_status: string;
+  queue_state: 'APPROVED_PENDING' | 'CLAIMED_IN_PROGRESS' | 'MANUAL_REVIEW' | 'REVOKED' | 'SUBMITTED' | string;
+  approved_at?: string | null;  // ISO-8601 UTC
+  approved_by?: string | null;
+  claimed_at?: string | null;
+  claimed_by?: string | null;
+  // Revocation info — non-null when the approval has been revoked
+  approval_revoked_at?: string | null;
+  approval_revoked_by?: string | null;
+  approval_revocation_reason?: string | null;
+  confirmation_ref?: string | null;
+}
+
+export interface RevokeApprovalResponse {
+  revoked: boolean;
+  application_id: number;
+  revoked_by: string;
+  revoked_at: string;  // ISO-8601 UTC
+}
+
+export interface ApprovalTokenResponse {
+  token: string;
+  expires_at: string;
+}

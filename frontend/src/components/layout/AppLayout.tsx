@@ -9,29 +9,35 @@ import {
   ExternalLink,
   Cpu,
   UserRound,
+  Clock,
 } from 'lucide-react';
 import { api } from '../../api/client';
 
 export const AppLayout: React.FC = () => {
   const location = useLocation();
   const [scamCount, setScamCount] = useState<number>(0);
+  const [queueCount, setQueueCount] = useState<number>(0);
 
-  // Poll or fetch scam review pending count periodically
+  // Poll or fetch pending counts periodically
   useEffect(() => {
     let isMounted = true;
-    const fetchPendingCount = async () => {
+    const fetchPendingCounts = async () => {
       try {
-        const items = await api.getPendingScamReviews(10, 0);
+        const [scamItems, qItems] = await Promise.all([
+          api.getPendingScamReviews(10, 0).catch(() => []),
+          api.getPendingQueue('approved_pending').catch(() => []),
+        ]);
         if (isMounted) {
-          setScamCount(items.length);
+          setScamCount(scamItems.length);
+          setQueueCount(qItems.length);
         }
       } catch {
         // Silently tolerate if backend is not yet started
       }
     };
 
-    fetchPendingCount();
-    const interval = setInterval(fetchPendingCount, 30000);
+    fetchPendingCounts();
+    const interval = setInterval(fetchPendingCounts, 30000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -195,6 +201,43 @@ export const AppLayout: React.FC = () => {
           >
             <Inbox size={16} />
             <span>Response Center</span>
+          </NavLink>
+
+          <NavLink
+            to="/submission-queue"
+            style={({ isActive }) => ({
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '8px 16px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '0.875rem',
+              fontWeight: 500,
+              textDecoration: 'none',
+              transition: 'all var(--transition-fast)',
+              color: isActive ? '#f5f5f7' : 'var(--text-secondary)',
+              background: isActive ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
+              border: isActive ? '1px solid var(--border-medium)' : '1px solid transparent',
+              boxShadow: isActive ? '0 2px 10px rgba(0,0,0,0.3)' : 'none',
+            })}
+          >
+            <Clock size={16} />
+            <span>Submission Queue</span>
+            {queueCount > 0 && (
+              <span
+                style={{
+                  background: 'var(--amber-500, #f59e0b)',
+                  color: '#07070b',
+                  fontSize: '0.7rem',
+                  fontWeight: 700,
+                  padding: '1px 6px',
+                  borderRadius: 'var(--radius-full)',
+                  marginLeft: '2px',
+                }}
+              >
+                {queueCount}
+              </span>
+            )}
           </NavLink>
 
           <NavLink

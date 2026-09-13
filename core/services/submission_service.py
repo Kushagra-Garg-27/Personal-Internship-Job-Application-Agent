@@ -19,6 +19,7 @@ M1 APPROVAL INVARIANT:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -182,6 +183,18 @@ def issue_approval_token(session: Session, application_id: int) -> str:
     (30-minute TTL), and resets ``approved_at`` so that a fresh confirmation
     round-trip is always required.
 
+    M5 REVOCATION AUDIT NOTE:
+        This function does NOT clear revocation columns.  Active revocation is
+        defined by timestamp comparison::
+
+            approval_revoked_at IS NOT NULL
+            AND (approved_at IS NULL OR approved_at <= approval_revoked_at)
+
+        When the subsequent ``confirm_and_submit`` sets a fresh ``approved_at``,
+        that timestamp will naturally supersede the older revocation without
+        erasing the audit record.  Both the claim CAS and the worker polling
+        predicate use this comparison.
+
     Parameters
     ----------
     session : Session
@@ -216,6 +229,9 @@ def issue_approval_token(session: Session, application_id: int) -> str:
     app.approval_token = token
     app.approval_token_expires_at = make_token_expiry()
     app.approved_at = None  # Reset: fresh confirmation required
+    # NOTE: revocation columns are intentionally NOT cleared here.
+    # The fresh approved_at set by confirm_and_submit() will supersede the
+    # revocation by timestamp comparison. Clearing them would erase audit evidence.
     session.flush()
     logger.info(
         "Approval token issued for application #%d (expires %s).",
@@ -223,6 +239,246 @@ def issue_approval_token(session: Session, application_id: int) -> str:
         app.approval_token_expires_at.isoformat(),
     )
     return token
+
+
+def compute_file_sha256(file_path: str | Path) -> str:
+    """Compute deterministic SHA-256 hash of file bytes on disk."""
+    hasher = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while chunk := f.read(65536):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def compute_profile_sha256(candidate_data: dict[str, Any] | None) -> str:
+    """Compute deterministic SHA-256 hash of serialized candidate profile data.
+
+    Note: This is an approved-input drift/correspondence check, not a signature
+    protecting against a compromised or malicious database writer.
+    """
+    raw = json.dumps(candidate_data or {}, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def compute_approved_input_digest(
+    *,
+    url: str | None = None,
+    resume_id: int | str | None = None,
+    resume_content_sha256: str | None = None,
+    candidate_profile_sha256: str | None = None,
+    candidate_data: dict[str, Any] | None = None,
+    custom_answers: list[dict[str, Any]] | None = None,
+    form_questions: list[str] | None = None,
+) -> str:
+    """Compute deterministic SHA-256 digest of approved inputs for drift/correspondence checking.
+
+    Note: This digest verifies that form reconstruction inputs correspond to what
+    the human reviewed and approved. It serves as an application input drift
+    check across asynchronous worker boundaries; it does not protect against
+    a malicious database writer.
+    """
+    if not candidate_profile_sha256 and candidate_data:
+        candidate_profile_sha256 = compute_profile_sha256(candidate_data)
+
+    payload = {
+        "url": url or "",
+        "resume_id": str(resume_id or ""),
+        "resume_content_sha256": resume_content_sha256 or "",
+        "candidate_profile_sha256": candidate_profile_sha256 or "",
+        "custom_answers": custom_answers or [],
+        "form_questions": sorted(form_questions or []),
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _is_actively_revoked(app: Application) -> bool:
+    """Return True when the application has an active (un-superseded) revocation.
+
+    Active revocation: ``approval_revoked_at IS NOT NULL`` AND either
+    ``approved_at IS NULL`` or ``approved_at <= approval_revoked_at``.
+
+    A newer ``approved_at`` (set by a fresh ``confirm_and_submit``) always
+    supersedes an older revocation without erasing the audit record.
+    """
+    if app.approval_revoked_at is None:
+        return False
+    if app.approved_at is None:
+        return True
+    return app.approved_at <= app.approval_revoked_at
+
+
+def derive_queue_state(app: Application, opp: Any) -> str:  # noqa: ANN001
+    """Return the derived M5 queue state for a (Application, Opportunity) pair.
+
+    States (mutually exclusive, evaluated in priority order):
+
+    SUBMITTED
+        Application is in submitted/applied terminal state.
+
+    MANUAL_REVIEW
+        Application or opportunity reflects a failed, ambiguous, or
+        manual-verification-required state.
+
+    CLAIMED_IN_PROGRESS
+        Worker has atomically claimed the application but has not yet submitted.
+
+    REVOKED
+        Approval was revoked and no newer ``approved_at`` supersedes it.
+
+    APPROVED_PENDING
+        Approved, unclaimed, and not revoked — waiting for worker pick-up.
+
+    UNKNOWN
+        Row reached the queue endpoint but matches none of the above;
+        indicates a data-integrity issue.
+    """
+    terminal_submitted = {
+        ApplicationStatus.SUBMITTED.value,
+        "applied",
+    }
+    terminal_manual = {
+        ApplicationStatus.FAILED.value,
+        OpportunityStatus.MANUAL_APPLICATION_REQUIRED.value,
+        "manual_application_required",
+    }
+
+    if app.status in terminal_submitted or (
+        hasattr(opp, "status") and opp.status in {"applied"}
+    ):
+        return "SUBMITTED"
+
+    if app.status in terminal_manual or (
+        hasattr(opp, "status")
+        and opp.status in {"manual_application_required"}
+    ):
+        return "MANUAL_REVIEW"
+
+    if app.submission_claimed_at is not None:
+        return "CLAIMED_IN_PROGRESS"
+
+    if _is_actively_revoked(app):
+        return "REVOKED"
+
+    if app.approved_at is not None:
+        return "APPROVED_PENDING"
+
+    return "UNKNOWN"
+
+
+def revoke_approval(
+    session: Session,
+    application_id: int,
+    *,
+    revoked_by: str = "human_operator",
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Atomically revoke a pending approval before the worker claims it (M5).
+
+    Uses a conditional UPDATE (CAS) to ensure that a worker claiming the
+    application concurrently cannot be revoked *after* it has already started
+    executing the submission.
+
+    Active revocation is determined by timestamp comparison (see
+    ``_is_actively_revoked``).  The revocation audit columns are never erased
+    by a subsequent re-approval token issuance; the newer ``approved_at``
+    supersedes the revocation by value.
+
+    Parameters
+    ----------
+    session : Session
+        SQLAlchemy database session (caller is responsible for commit).
+    application_id : int
+        ID of the application whose approval is to be revoked.
+    revoked_by : str
+        Audit label of the human operator performing the revocation.
+    reason : str | None
+        Optional human-readable reason for revocation.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"revoked": True, "application_id": ..., "revoked_by": ..., "revoked_at": ...}``
+
+    Raises
+    ------
+    ValueError
+        If the application does not exist, has no pending un-superseded approval,
+        has already been claimed, is submitted, or is in a terminal/manual state.
+    """
+    from sqlalchemy import and_, or_, update
+
+    _terminal = {
+        ApplicationStatus.SUBMITTED.value,
+        ApplicationStatus.FAILED.value,
+        OpportunityStatus.MANUAL_APPLICATION_REQUIRED.value,
+        "applied",
+        "manual_application_required",
+    }
+
+    app = session.get(Application, application_id)
+    if app is None:
+        raise ValueError(f"Application {application_id} not found.")
+    if app.approved_at is None or _is_actively_revoked(app):
+        raise ValueError(
+            f"Application {application_id} has no pending approval to revoke "
+            "(approved_at is NULL or already actively revoked)."
+        )
+    if app.submission_claimed_at is not None:
+        raise ValueError(
+            f"Application {application_id} has already been claimed by worker "
+            f"{app.claimed_by!r} at {app.submission_claimed_at}; cannot revoke."
+        )
+    if app.status in _terminal:
+        raise ValueError(
+            f"Application {application_id} is in terminal status {app.status!r}; "
+            "revocation is not meaningful."
+        )
+
+    now = datetime.now(timezone.utc)
+
+    # Atomic CAS — all eligibility conditions in a single SQL statement.
+    # Whichever operation (revoke vs claim) commits first wins; the other gets rowcount=0.
+    result = session.execute(
+        update(Application)
+        .where(
+            Application.id == application_id,
+            Application.approved_at.is_not(None),
+            # Active revocation check: no un-superseded revocation already present
+            or_(
+                Application.approval_revoked_at.is_(None),
+                Application.approved_at > Application.approval_revoked_at,
+            ),
+            Application.submission_claimed_at.is_(None),
+            Application.status.not_in(list(_terminal)),
+        )
+        .values(
+            approved_at=None,
+            approval_revoked_at=now,
+            approval_revoked_by=revoked_by,
+            approval_revocation_reason=reason,
+        )
+    )
+    if result.rowcount == 0:
+        raise ValueError(
+            f"Application {application_id} was claimed by a worker concurrently; "
+            "revocation failed. The submission is already in progress."
+        )
+
+    session.refresh(app)
+    session.flush()
+    logger.info(
+        "Approval for application #%d revoked by %r (reason=%r).",
+        application_id,
+        revoked_by,
+        reason,
+    )
+    return {
+        "revoked": True,
+        "application_id": application_id,
+        "revoked_by": revoked_by,
+        "revoked_at": now.isoformat(),
+    }
 
 
 def confirm_and_submit(
@@ -341,6 +597,50 @@ def confirm_and_submit(
         # M1 single-use: consume the token so it cannot be replayed.
         app.approval_token = None
         app.approval_token_expires_at = None
+
+        # Invariant 2: Seal approved input snapshot & digest into notes
+        snapshot = notes_data.get("approved_input_snapshot")
+        if not snapshot:
+            snapshot = {
+                "url": opp.url or "",
+                "resume_id": opp.selected_resume_id or app.resume_id,
+                "custom_answers": notes_data.get("custom_answers", []),
+                "form_questions": [
+                    q.get("label") or q.get("text") or q.get("name") or str(q.get("id"))
+                    if isinstance(q, dict) else str(q)
+                    for q in (notes_data.get("form_questions") or [])
+                ],
+            }
+            notes_data["approved_input_snapshot"] = snapshot
+
+        # If candidate_data was stored in snapshot, convert to hash and remove plaintext PII
+        if "candidate_data" in snapshot and not snapshot.get("candidate_profile_sha256"):
+            snapshot["candidate_profile_sha256"] = compute_profile_sha256(snapshot.pop("candidate_data"))
+        elif "candidate_data" in snapshot:
+            snapshot.pop("candidate_data", None)
+
+        # Hash resume bytes if not already hashed and resume file is accessible on disk
+        res_id = snapshot.get("resume_id") or opp.selected_resume_id or app.resume_id
+        if res_id is not None:
+            snapshot["resume_id"] = res_id
+            if not snapshot.get("resume_content_sha256"):
+                from core.models.resume import Resume
+                res_record = session.get(Resume, res_id)
+                if res_record and res_record.file_path and Path(res_record.file_path).is_file():
+                    try:
+                        snapshot["resume_content_sha256"] = compute_file_sha256(res_record.file_path)
+                    except Exception as exc:
+                        logger.warning("Could not hash resume at %s: %s", res_record.file_path, exc)
+
+        notes_data["approved_input_digest"] = compute_approved_input_digest(
+            url=snapshot.get("url"),
+            resume_id=snapshot.get("resume_id"),
+            resume_content_sha256=snapshot.get("resume_content_sha256"),
+            candidate_profile_sha256=snapshot.get("candidate_profile_sha256"),
+            custom_answers=snapshot.get("custom_answers"),
+            form_questions=snapshot.get("form_questions"),
+        )
+        app.notes = json.dumps(notes_data, default=str)
         session.flush()
         session.commit()
         logger.info(
@@ -358,7 +658,14 @@ def confirm_and_submit(
     # ── Stable HTTP API Tier ──────────────────────────────────────────
     # Candidate reviews pending draft payload and explicitly authorizes
     # the programmatic HTTP POST submission call.
+    # M1 single-use: consume the token now (before the network call) so
+    # it cannot be replayed on timeout/retry regardless of outcome.
+    app.approval_token = None
+    app.approval_token_expires_at = None
+    session.flush()
+
     draft_payload = notes_data.get("draft_payload")
+
     if not draft_payload:
         raise ValueError("No draft payload found on application record to submit.")
 

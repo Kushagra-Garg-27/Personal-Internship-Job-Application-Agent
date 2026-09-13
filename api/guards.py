@@ -44,43 +44,72 @@ import logging
 
 from fastapi import Header, HTTPException, status
 
-from core.config import settings
+from core.config import WEAK_SECRETS, settings
 
 logger = logging.getLogger(__name__)
 
 _GUARD_DISABLED_LOGGED = False
 
 
+def is_secret_adequate(secret: str | None) -> bool:
+    """Return True if the secret meets length (>= 32 chars) and entropy standards."""
+    if not secret or len(secret) < 32:
+        return False
+    if secret.lower() in WEAK_SECRETS:
+        return False
+    if len(set(secret)) < 4:
+        return False
+    return True
+
+
 def require_submission_secret(
     x_submission_secret: str | None = Header(default=None, alias="x-submission-secret"),
 ) -> None:
-    """FastAPI dependency: enforce the X-Submission-Secret header guard (M3).
+    """FastAPI dependency: enforce the X-Submission-Secret header guard (M3.1).
 
-    When ``settings.SUBMISSION_API_SECRET`` is empty, this dependency is a
-    no-op.  When it is set, the request *must* supply a matching header value.
+    In 'required' mode (default):
+      - If SUBMISSION_API_SECRET is missing, empty, or inadequate: fail closed with 503.
+      - If X-Submission-Secret header is missing or incorrect: 403 Forbidden.
+      - If header matches configured secret: proceeds.
 
-    Raises
-    ------
-    HTTPException(403)
-        If the secret is configured and the header is missing or incorrect.
+    In 'disabled' mode:
+      - Explicit opt-out; logs a prominent warning and permits the request.
     """
     global _GUARD_DISABLED_LOGGED
 
-    configured_secret = settings.SUBMISSION_API_SECRET
-    if not configured_secret:
-        # Guard is opt-in — log once at startup-equivalent, then be silent.
+    guard_mode = getattr(settings, "SUBMISSION_GUARD_MODE", "required")
+
+    if guard_mode == "disabled":
         if not _GUARD_DISABLED_LOGGED:
             logger.warning(
-                "M3: SUBMISSION_API_SECRET is not configured — "
+                "M3: SUBMISSION_GUARD_MODE is explicitly 'disabled' — "
                 "submission-boundary endpoints are unguarded. "
-                "Set SUBMISSION_API_SECRET in your environment or .env to enable the guard."
+                "Never use disabled mode in production."
             )
             _GUARD_DISABLED_LOGGED = True
-        return  # No-op — development / unset mode
+        return
 
-    # Guard is active. Require a matching header (constant-time comparison).
+    if guard_mode != "required":
+        logger.error("M3 guard: unrecognized SUBMISSION_GUARD_MODE '%s'. Failing closed.", guard_mode)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Submission guard configuration is invalid.",
+        )
+
+    # Required mode: fail closed if secret is missing or inadequate
+    configured_secret = getattr(settings, "SUBMISSION_API_SECRET", "")
+    if not is_secret_adequate(configured_secret):
+        logger.error(
+            "M3 guard: SUBMISSION_GUARD_MODE is 'required' but SUBMISSION_API_SECRET is not properly configured. "
+            "Failing closed with HTTP 503."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Submission guard is misconfigured. Submission operations are disabled.",
+        )
+
+    # Required mode: check request header
     if x_submission_secret is None:
-        # Do NOT log the configured secret or the missing value.
         logger.warning("M3 guard: rejected request — X-Submission-Secret header missing.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -90,12 +119,10 @@ def require_submission_secret(
             ),
         )
 
-    # hmac.compare_digest prevents timing-based secret extraction.
+    # Constant-time comparison
     if not hmac.compare_digest(x_submission_secret, configured_secret):
         logger.warning("M3 guard: rejected request — X-Submission-Secret header mismatch.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid X-Submission-Secret header.",
         )
-
-    # Header matched — allow the request to proceed.

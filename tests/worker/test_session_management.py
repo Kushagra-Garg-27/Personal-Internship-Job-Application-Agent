@@ -521,25 +521,21 @@ def test_worker_fails_closed_when_session_corrupted(db_session, tmp_path: Path):
 # ── 10. Existing U4 Submission / Fill Boundaries Remain Unchanged ─────────
 
 def test_u4_submission_boundary_remains_fail_closed():
-    adapter = UnstopAdapter()
-    ctx = ApplicationContext(
-        opportunity_id=101,
-        listing_url="https://unstop.com/competitions/test/register",
-        adapter_name="unstop",
-        tier=adapter.tier,
-    )
+    # M1 handoff repair: authorization boundary moved from adapter to orchestrator.
+    # The adapter's approval_token parameter was removed; the gate is now in
+    # execute_browser_submission (approved_at IS NOT NULL + atomic claim).
+    #
+    # Verify that is_token_valid (the service-layer gate) rejects all bad inputs:
+    for probe in [None, "", "ready_for_review", "valid", "HUMAN_CONFIRMED"]:
+        assert is_token_valid(probe, generate_approval_token(), make_token_expiry()) is False
 
-    # Any token shorter than 32 chars (including None, empty, static constant) fails closed
-    for probe in [None, "", "ready_for_review", "valid", True, False, "HUMAN_CONFIRMED"]:
-        with pytest.raises(PermissionError):
-            adapter.submit_application(ctx, approval_token=probe)  # type: ignore[arg-type]
-
-    # M1: is_token_valid is the gate (not is_human_approved)
+    # M1: is_token_valid is the service-layer gate (not a string-length check)
     good = generate_approval_token()
     exp = make_token_expiry()
     assert is_token_valid(good, good, exp) is True
     assert is_token_valid("HUMAN_CONFIRMED_SUBMIT", good, exp) is False
     assert is_token_valid(None, good, exp) is False
+
 
 
 # ── 11. Unstop Authenticated Endpoint Probe Unit Tests ──────────────────────

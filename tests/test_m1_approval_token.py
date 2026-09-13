@@ -301,14 +301,39 @@ class TestClaimColumns:
         runner = WorkerRunner()
         assert runner.claim_application_for_submission(db_session, app.id) is False
 
-    def test_expired_token_cannot_claim(self, db_session):
+    def test_approved_at_is_sole_claim_gate_not_token(self, db_session):
+        """M1 handoff repair: approved_at is the only durable claim gate.
+
+        Before this fix, the claim step re-checked the token, which meant a
+        confirmed application (token consumed → None) could never be claimed.
+        In the corrected design:
+        - approved_at IS NOT NULL → claim succeeds (token state is irrelevant)
+        - approved_at IS NULL     → claim fails (even if a stale/expired token exists)
+
+        The expired-token state cannot occur in real flow (confirm_and_submit
+        clears both the token and expiry when setting approved_at), but even
+        if it did, approved_at=set is definitive proof of human confirmation.
+        """
         opp, app = _make_browser_app(db_session, "clm4")
+        # Simulate a post-confirm state where the token happened to be retained
+        # (impossible in real flow, but the gate should not break if it occurs).
         app.approval_token = generate_approval_token()
         app.approval_token_expires_at = datetime.now(timezone.utc) - timedelta(seconds=1)
-        app.approved_at = datetime.now(timezone.utc)
+        app.approved_at = datetime.now(timezone.utc)  # durable approval IS set
         db_session.commit()
+
         runner = WorkerRunner()
-        assert runner.claim_application_for_submission(db_session, app.id) is False
+        # approved_at is set → claim MUST succeed regardless of token state
+        assert runner.claim_application_for_submission(db_session, app.id) is True
+
+        # Without approved_at the claim must fail (even with a live token)
+        opp2, app2 = _make_browser_app(db_session, "clm4b")
+        app2.approval_token = generate_approval_token()
+        app2.approval_token_expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+        app2.approved_at = None  # human has NOT confirmed
+        db_session.commit()
+        assert runner.claim_application_for_submission(db_session, app2.id) is False
+
 
     def test_approval_remains_claimable_indefinitely_after_confirm(self, db_session):
         """M1 behavior lock: token TTL bounds the window for human confirmation. 

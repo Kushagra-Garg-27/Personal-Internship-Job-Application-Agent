@@ -9,6 +9,7 @@ vi.mock('../../api/client', () => ({
     listApplications: vi.fn(),
     requestApprovalToken: vi.fn(),
     confirmSubmitApplication: vi.fn(),
+    getGuardStatus: vi.fn(),
   },
 }));
 
@@ -54,6 +55,14 @@ const mockApplication: ApplicationResponse = {
 describe('SubmissionReviewModal (U4 Human Submission Gate)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getGuardStatus).mockResolvedValue({
+      mode: 'disabled',
+      cli_command: 'python scripts/approve_submission.py',
+    });
+    vi.mocked(api.requestApprovalToken).mockResolvedValue({
+      token: 'server-issued-test-token-uuid-1234',
+      expires_at: '2026-12-31T23:59:59Z',
+    });
   });
 
   it('does not render when isOpen is false', () => {
@@ -397,5 +406,69 @@ describe('SubmissionReviewModal (U4 Human Submission Gate)', () => {
       expect(screen.queryByRole('button', { name: /Confirm & Submit Application/i })).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument();
     });
+  });
+
+  it('11. (M3.1) Guarded mode (required) displays CLI guidance and hides direct submit button', async () => {
+    vi.mocked(api.getGuardStatus).mockResolvedValueOnce({
+      mode: 'required',
+      cli_command: 'python scripts/approve_submission.py',
+    });
+    vi.mocked(api.listApplications).mockResolvedValueOnce([mockApplication]);
+
+    render(
+      <SubmissionReviewModal
+        opportunity={mockOpportunity}
+        isOpen={true}
+        onClose={vi.fn()}
+        onSubmitted={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('m3-guarded-notice')).toBeInTheDocument();
+      expect(
+        screen.getByText(/python scripts\/approve_submission\.py --application-id 99/i)
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Privileged Local Approval Channel Required/i)
+      ).toBeInTheDocument();
+    });
+
+    // Directly confirming in UI must not be offered
+    expect(
+      screen.queryByRole('button', { name: /Confirm & Submit Application/i })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: /I have reviewed the prepared application/i })
+    ).not.toBeInTheDocument();
+  });
+
+  it('12. (M3.1) Failure to load /applications/guard-status defaults the submission modal to protected/CLI-guidance mode', async () => {
+    vi.mocked(api.getGuardStatus).mockRejectedValueOnce(new Error('Network error loading guard status'));
+    vi.mocked(api.listApplications).mockResolvedValueOnce([mockApplication]);
+
+    render(
+      <SubmissionReviewModal
+        opportunity={mockOpportunity}
+        isOpen={true}
+        onClose={vi.fn()}
+        onSubmitted={vi.fn()}
+      />
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('m3-guarded-notice')).toBeInTheDocument();
+      expect(
+        screen.getByText(/Privileged Local Approval Channel Required/i)
+      ).toBeInTheDocument();
+    });
+
+    // Directly confirming in UI must not be offered
+    expect(
+      screen.queryByRole('button', { name: /Confirm & Submit Application/i })
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('checkbox', { name: /I have reviewed the prepared application/i })
+    ).not.toBeInTheDocument();
   });
 });

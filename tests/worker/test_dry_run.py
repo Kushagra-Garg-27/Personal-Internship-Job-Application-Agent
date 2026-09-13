@@ -407,20 +407,18 @@ def test_u4_submission_gate_remains_intact(db_session, dry_run_db_setup):
     opportunity_service.transition_status(db_session, opp.id, OpportunityStatus.AWAITING_SUBMISSION, actor="test")
     db_session.commit()
 
-    # Missing approval token MUST fail closed
+    # Missing approval token MUST fail closed at service layer
     with pytest.raises(SubmissionApprovalRequiredError):
         confirm_and_submit(db_session, app.id, approval_token=None)
 
     with pytest.raises(SubmissionApprovalRequiredError):
         confirm_and_submit(db_session, app.id, approval_token="invalid_token")
 
-    # Adapter-level submission call without approval token MUST raise PermissionError
-    adapter = UnstopAdapter()
-    ctx = ApplicationContext(
-        opportunity_id=opp.id,
-        listing_url=opp.url,
-        adapter_name="unstop",
-        tier=adapter.tier,
-    )
-    with pytest.raises(PermissionError):
-        adapter.submit_application(ctx, approval_token=None)
+    # M1 handoff repair: authorization boundary moved from adapter to orchestrator.
+    # execute_browser_submission enforces: approved_at IS NOT NULL + claim before adapter call.
+    # Calling execute_browser_submission without a claim raises RuntimeError (fail-closed).
+    from worker.engine.filler import ApplicationFiller
+    filler = ApplicationFiller()
+    with pytest.raises(RuntimeError, match="must be claimed"):
+        filler.execute_browser_submission(db_session, app.id)
+

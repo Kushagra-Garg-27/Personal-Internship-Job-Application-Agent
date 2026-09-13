@@ -1344,19 +1344,23 @@ class UnstopAdapter(BasePlatformAdapter):
     def submit_application(
         self,
         app_ctx: ApplicationContext,
-        *,
-        approval_token: str | None = None,
     ) -> dict[str, Any]:
         """Click the final Unstop submit control and verify real platform confirmation.
+
+        Authorization model (M1 handoff repair):
+        Authorization is verified by the orchestrator (``execute_browser_submission``)
+        before this method is called, via two durable DB checks:
+          - ``approved_at IS NOT NULL``: human explicitly confirmed submission
+          - ``submission_claimed_at IS NOT NULL``: atomic exclusive worker claim
+
+        The human approval token is consumed (cleared) by ``confirm_and_submit``
+        and must NOT be passed here. String-length checks on a parameter are
+        not a meaningful authorization boundary — the orchestrator is.
 
         Parameters
         ----------
         app_ctx : ApplicationContext
             Live context holding the filled, reviewed page.
-        approval_token : str | None
-            Must be a server-issued approval token (≥32 chars, from
-            ``request-approval-token``). Short strings, None, and the former
-            static constant are rejected before any browser interaction.
 
         Returns
         -------
@@ -1364,15 +1368,8 @@ class UnstopAdapter(BasePlatformAdapter):
             ``{"success", "confirmed", "confirmation_ref", "detail", ...}``.
             ``success`` is True only when Unstop itself reported confirmation.
         """
-        from core.tokens import APPROVAL_TOKEN_MIN_LENGTH
-
-        if not (isinstance(approval_token, str) and len(approval_token) >= APPROVAL_TOKEN_MIN_LENGTH):
-            raise PermissionError(
-                "Unstop submit refused: a valid server-issued approval token (≥32 chars) is required. "
-                "ready_for_review, empty strings, and static constants are NOT approval."
-            )
-
         page = app_ctx.browser_page
+
         if page is None:
             return {
                 "success": False,

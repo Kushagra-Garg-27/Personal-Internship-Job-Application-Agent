@@ -228,5 +228,13 @@ class ApplicationResponse(BaseModel):
     notes: str | None = None
     created_at: datetime
     updated_at: datetime
+    approved_at: datetime | None = None
+    approved_by: str | None = None
+    submission_claimed_at: datetime | None = None
+    claimed_by: str | None = None
+    # M5: Revocation audit
+    approval_revoked_at: datetime | None = None
+    approval_revoked_by: str | None = None
+    approval_revocation_reason: str | None = None
 
     model_config = ConfigDict(from_attributes=True)

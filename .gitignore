@@ -53,3 +53,8 @@ worker/storage/brave_agent_profile/
 
 # Runtime validation artifacts (screenshots, evidence logs)
 artifacts/
+
+# Antigravity agent customizations
+.agents/
+skills-lock.json
+

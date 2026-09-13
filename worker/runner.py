@@ -17,14 +17,13 @@ from typing import Any
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.schedulers.background import BackgroundScheduler
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from core.database import get_session
 from core.models.opportunity import Application, Opportunity
 from core.status import ApplicationStatus, OpportunityStatus
-from core.tokens import is_token_valid
 from worker.engine.filler import ApplicationFiller
 
 logger = logging.getLogger(__name__)
@@ -103,10 +102,12 @@ class WorkerRunner:
         # confirm_and_submit (single-use). Check approved_at — not the token.
         if app.approved_at is None:
             return False
-        # If the token is still present (pre-confirm), enforce expiry too.
-        if app.approval_token is not None and app.approval_token_expires_at is not None:
-            if not is_token_valid(app.approval_token, app.approval_token, app.approval_token_expires_at):
-                return False
+
+        # Pre-flight: skip actively revoked applications
+        if app.approval_revoked_at is not None and (
+            app.approved_at is None or app.approved_at <= app.approval_revoked_at
+        ):
+            return False
 
         opp = session.get(Opportunity, app.opportunity_id)
         if opp is None or opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
@@ -119,12 +120,17 @@ class WorkerRunner:
         # Atomic conditional UPDATE: wins only if submission_claimed_at is still NULL.
         # approved_at IS NOT NULL is the durable authorization signal (token may be
         # already consumed / cleared by confirm_and_submit).
+        # Also ensures no active (un-superseded) revocation is present.
         stmt = (
             update(Application)
             .where(
                 Application.id == application_id,
                 Application.submission_claimed_at.is_(None),
-                Application.approved_at.isnot(None),
+                Application.approved_at.is_not(None),
+                or_(
+                    Application.approval_revoked_at.is_(None),
+                    Application.approved_at > Application.approval_revoked_at,
+                ),
                 Application.status != ApplicationStatus.SUBMITTED.value,
             )
             .values(
@@ -168,13 +174,20 @@ class WorkerRunner:
                 if app.status == ApplicationStatus.SUBMITTED.value:
                     continue
 
-                # M1: Validate DB-column approval (no notes JSON, no static constant)
+                # M1: Validate durable approval (approved_at is set by
+                # confirm_and_submit after consuming the single-use token).
+                # The token itself is cleared upon confirmation — do NOT
+                # re-check it here.
                 if app.approved_at is None:
                     continue  # Human has not confirmed yet
-                if not is_token_valid(
-                    app.approval_token, app.approval_token, app.approval_token_expires_at
+
+                # M5: Skip explicitly revoked approvals.
+                # Belt-and-suspenders guard covering any edge case where the
+                # revocation timestamp is set, while allowing newer re-approvals to proceed.
+                if app.approval_revoked_at is not None and (
+                    app.approved_at is None or app.approved_at <= app.approval_revoked_at
                 ):
-                    continue  # Token absent or expired
+                    continue
 
                 # Skip already-claimed
                 if app.submission_claimed_at is not None:

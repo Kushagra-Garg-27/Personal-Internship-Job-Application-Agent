@@ -3,8 +3,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
+
+
+WEAK_SECRETS: set[str] = {
+    "password",
+    "secret",
+    "admin",
+    "12345678",
+    "changeme",
+    "default",
+    "submission_secret",
+    "submissionsecret",
+    "1234567890123456",
+    "abcdefghijklmnop",
+    "supersecretpassword",
+}
 
 
 class Settings(BaseSettings):
@@ -170,13 +187,28 @@ class Settings(BaseSettings):
     V1_TARGET_PLATFORM: str = "unstop"
     ACTIVE_PLATFORMS: list[str] = ["unstop"]
 
-    # ── M3: Submission API Access Guard ─────────────────────────────────
-    # When set to a non-empty string, the `POST request-approval-token` and
-    # `POST confirm-submit` endpoints require every request to include:
-    #   X-Submission-Secret: <this value>
-    # Comparison is constant-time. The value is never logged.
-    # Leave empty (default) to disable the guard — all requests pass through.
+    # ── M3.1: Submission Guard Configuration ────────────────────────────
+    # Mode must be "required" (default, fail-closed) or "disabled" (explicit opt-out).
+    # In "required" mode, SUBMISSION_API_SECRET must be configured with an
+    # adequately long (>=32 chars), non-trivial operator-provided secret
+    # (e.g. generated with secrets.token_urlsafe(32)).
+    SUBMISSION_GUARD_MODE: Literal["required", "disabled"] = "required"
     SUBMISSION_API_SECRET: str = ""
+
+    @field_validator("SUBMISSION_API_SECRET")
+    @classmethod
+    def validate_submission_secret(cls, v: str) -> str:
+        if v:
+            if len(v) < 32:
+                raise ValueError(
+                    "SUBMISSION_API_SECRET must be at least 32 characters long "
+                    "(e.g. generated via secrets.token_urlsafe(32))."
+                )
+            if v.lower() in WEAK_SECRETS:
+                raise ValueError("SUBMISSION_API_SECRET is too weak or trivial.")
+            if len(set(v)) < 4:
+                raise ValueError("SUBMISSION_API_SECRET must contain at least 4 distinct characters.")
+        return v
 
     # ── M3: CORS allowed origins ──────────────────────────────────────────
     # Explicit localhost origins for the frontend dev server.

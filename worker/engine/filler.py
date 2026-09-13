@@ -19,6 +19,11 @@ from core.models.profile import Profile
 from core.models.resume import Resume
 from core.repositories import profile_repo
 from core.services import application_service, opportunity_service
+from core.services.submission_service import (
+    compute_approved_input_digest,
+    compute_file_sha256,
+    compute_profile_sha256,
+)
 from core.status import (
     ApplicationStatus,
     OpportunityStatus,
@@ -279,12 +284,47 @@ class ApplicationFiller:
             }
 
         # Success: form filled, awaiting human submission
+        questions_list = [
+            q.get("label") or q.get("text") or q.get("name") or str(q.get("id"))
+            if isinstance(q, dict) else str(q)
+            for q in (extracted.custom_questions if extracted else [])
+        ]
+        # Hash resume file bytes if accessible on disk
+        resume_content_sha256 = None
+        if resume_path and Path(resume_path).is_file():
+            try:
+                resume_content_sha256 = compute_file_sha256(resume_path)
+            except Exception as exc:
+                logger.warning("Could not hash resume at %s: %s", resume_path, exc)
+
+        # Do not duplicate raw candidate PII into notes; store deterministic hash
+        candidate_profile_sha256 = compute_profile_sha256(candidate_data)
+
+        input_snapshot = {
+            "url": opp.url or "",
+            "resume_id": resume_id,
+            "resume_content_sha256": resume_content_sha256,
+            "candidate_profile_sha256": candidate_profile_sha256,
+            "custom_answers": fill_result.custom_answers,
+            "form_questions": questions_list,
+        }
+        input_digest = compute_approved_input_digest(
+            url=input_snapshot["url"],
+            resume_id=input_snapshot["resume_id"],
+            resume_content_sha256=input_snapshot["resume_content_sha256"],
+            candidate_profile_sha256=input_snapshot["candidate_profile_sha256"],
+            custom_answers=input_snapshot["custom_answers"],
+            form_questions=input_snapshot["form_questions"],
+        )
         notes_dict = {
             "adapter": adapter.adapter_name,
             "tier": adapter.tier.value,
             "custom_answers": fill_result.custom_answers,
             "draft_payload": fill_result.draft_payload,
             "filled_at": datetime.now(timezone.utc).isoformat(),
+            "form_questions": questions_list,
+            "approved_input_snapshot": input_snapshot,
+            "approved_input_digest": input_digest,
         }
         application_service.transition_application_status(
             session,
@@ -316,6 +356,286 @@ class ApplicationFiller:
             "final_url": final_url,
             "app_ctx": app_ctx,
         }
+
+    def reconstruct_form_state(
+        self,
+        session: Session,
+        application_id: int,
+    ) -> dict[str, Any]:
+        """Reopen an already-filled application form to its final pre-submit state.
+
+        This method is used by the worker *after* human approval and atomic claim
+        to restore the browser page to the review screen before calling the
+        adapter's submit action.
+
+        Key design constraints (M1 handoff repair):
+        - Operates on the *existing* Application record — does NOT create a new one.
+        - Requires the opportunity to be in ``AWAITING_SUBMISSION`` (not ``READY_TO_APPLY``).
+        - Reuses the custom answers already stored in the application notes
+          (from the original ``process_opportunity`` fill) rather than re-drafting.
+        - Reuses the pinned resume where available.
+        - Stops at the final review screen — performs no submission.
+        - Fails closed if reconstruction cannot succeed.
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{"success": True, "app_ctx": ApplicationContext, ...}`` on success.
+            ``{"success": False, "error": str}`` on failure.
+        """
+        app = session.get(Application, application_id)
+        if app is None:
+            return {"success": False, "error": f"Application {application_id} not found."}
+
+        opp = session.get(Opportunity, app.opportunity_id)
+        if opp is None:
+            return {"success": False, "error": f"Opportunity {app.opportunity_id} not found."}
+
+        if opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
+            return {
+                "success": False,
+                "error": f"Opportunity #{opp.id} is in {opp.status!r}, expected awaiting_submission.",
+            }
+
+        # 1. Parse stored notes to recover the previously reviewed custom answers
+        notes_data: dict[str, Any] = {}
+        if app.notes:
+            try:
+                notes_data = json.loads(app.notes)
+            except Exception:
+                pass
+
+        stored_custom_answers = notes_data.get("custom_answers", [])
+        approved_snapshot = notes_data.get("approved_input_snapshot")
+
+        # 2. Resolve candidate profile
+        profile = None
+        if opp.profile_id is not None:
+            profile = session.get(Profile, opp.profile_id)
+        if profile is None:
+            profiles = profile_repo.list_profiles(session)
+            if profiles:
+                profile = profiles[0]
+        candidate_data = serialize_profile(profile)
+        current_profile_hash = compute_profile_sha256(candidate_data)
+
+        # 3. Resolve and verify resume (Requirement 3 & 4)
+        resume_id: int | None = None
+        resume_path: str | None = None
+        current_resume_hash: str | None = None
+
+        if approved_snapshot:
+            # When an approved snapshot exists, resolve the EXACT approved pinned resume.
+            # Do NOT silently fall back to another active resume after approval.
+            approved_resume_id = approved_snapshot.get("resume_id")
+            current_opp_resume_id = opp.selected_resume_id or app.resume_id
+
+            if approved_resume_id is not None:
+                if str(current_opp_resume_id) != str(approved_resume_id):
+                    reason = (
+                        f"Resume selection mismatch: approved resume ID {approved_resume_id!r}, "
+                        f"current {current_opp_resume_id!r}. Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                res = session.get(Resume, int(approved_resume_id))
+                if res is None:
+                    reason = (
+                        f"Pinned approved resume #{approved_resume_id} not found in database. "
+                        "Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                if not res.file_path:
+                    reason = (
+                        f"Pinned approved resume #{approved_resume_id} has no file path. "
+                        "Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                resume_file = Path(res.file_path)
+                if not resume_file.is_file():
+                    reason = (
+                        f"Pinned approved resume file not found at {res.file_path}. "
+                        "Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                try:
+                    current_resume_hash = compute_file_sha256(resume_file)
+                except (PermissionError, OSError) as exc:
+                    reason = (
+                        f"Pinned approved resume file at {res.file_path} is unreadable: {exc}. "
+                        "Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                approved_resume_hash = approved_snapshot.get("resume_content_sha256")
+                if not approved_resume_hash:
+                    reason = (
+                        f"Pinned approved resume #{approved_resume_id} has no approved content hash. "
+                        "Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                if current_resume_hash != approved_resume_hash:
+                    reason = (
+                        f"Resume content mismatch: file bytes changed since approval. "
+                        f"Approved hash: {approved_resume_hash}, current hash: {current_resume_hash}. "
+                        "Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+                resume_id = approved_resume_id
+                resume_path = str(resume_file)
+            else:
+                # Approved without resume
+                if current_opp_resume_id is not None:
+                    reason = (
+                        f"Resume selection mismatch: approved with no resume, "
+                        f"current {current_opp_resume_id!r}. Failing closed to fresh human review."
+                    )
+                    logger.error("App #%d: %s", app.id, reason)
+                    return {"success": False, "error": reason}
+
+            # 3b. Invariant 2: Verify remaining pre-browser inputs against approved snapshot
+            # 1. Opportunity URL check
+            expected_url = approved_snapshot.get("url")
+            if expected_url is not None and (opp.url or "") != expected_url:
+                reason = (
+                    f"Opportunity URL mismatch: approved {expected_url!r}, current {opp.url!r}. "
+                    "Failing closed to fresh human review."
+                )
+                logger.error("App #%d: %s", app.id, reason)
+                return {"success": False, "error": reason}
+
+            # 2. Candidate profile data check (hash-based to avoid PII duplication)
+            expected_profile_hash = approved_snapshot.get("candidate_profile_sha256")
+            if not expected_profile_hash and "candidate_data" in approved_snapshot:
+                expected_profile_hash = compute_profile_sha256(approved_snapshot.get("candidate_data"))
+            if expected_profile_hash is not None and current_profile_hash != expected_profile_hash:
+                reason = (
+                    "Candidate profile data mismatch: profile data changed between approval "
+                    "and reconstruction. Failing closed to fresh human review."
+                )
+                logger.error("App #%d: %s", app.id, reason)
+                return {"success": False, "error": reason}
+
+            # 3. Stored custom answers check
+            expected_answers = approved_snapshot.get("custom_answers")
+            if expected_answers is not None and stored_custom_answers != expected_answers:
+                reason = (
+                    "Stored custom answers mismatch: custom answers changed between approval "
+                    "and reconstruction. Failing closed to fresh human review."
+                )
+                logger.error("App #%d: %s", app.id, reason)
+                return {"success": False, "error": reason}
+        else:
+            # Legacy / mock path when no approved_snapshot is present
+            resume_id = opp.selected_resume_id
+            if resume_id is not None:
+                res = session.get(Resume, resume_id)
+                if res:
+                    resume_path = res.file_path
+            if not resume_path and profile and profile.resumes:
+                for r in profile.resumes:
+                    if r.is_active:
+                        resume_path = r.file_path
+                        resume_id = r.id
+                        break
+
+        # 4. Resolve adapter
+        if self.adapter_override is not None:
+            adapter = self.adapter_override
+        else:
+            try:
+                adapter = resolve_adapter(opp)
+            except (DiscoveryOnlyRejectionError, UnsupportedPlatformError) as exc:
+                return {"success": False, "error": str(exc)}
+
+        # 5. Open the application page (browser) and re-fill to the review screen
+        try:
+            app_ctx = adapter.open_application(opp.url or "", opportunity_id=opp.id)
+            extracted = app_ctx.extracted or adapter.extract(opp)
+            app_ctx.extracted = extracted
+
+            # Invariant 2: Form structure and digest check against approved snapshot
+            current_questions = [
+                q.get("label") or q.get("text") or q.get("name") or str(q.get("id"))
+                if isinstance(q, dict) else str(q)
+                for q in (extracted.custom_questions if extracted else [])
+            ]
+            if approved_snapshot:
+                expected_questions = approved_snapshot.get("form_questions")
+                if expected_questions is not None:
+                    norm_expected = sorted([
+                        q.get("label") or q.get("text") or q.get("name") or str(q.get("id"))
+                        if isinstance(q, dict) else str(q)
+                        for q in expected_questions
+                    ])
+                    norm_current = sorted(current_questions)
+                    if norm_current != norm_expected:
+                        reason = (
+                            "Form structure mismatch: extracted questions on live page do not match "
+                            f"approved form questions. Approved: {norm_expected}, live: {norm_current}. "
+                            "Failing closed to fresh human review."
+                        )
+                        logger.error("App #%d: %s", app.id, reason)
+                        return {"success": False, "error": reason}
+
+                expected_digest = notes_data.get("approved_input_digest")
+                if expected_digest:
+                    current_digest = compute_approved_input_digest(
+                        url=opp.url or "",
+                        resume_id=opp.selected_resume_id or app.resume_id or resume_id,
+                        resume_content_sha256=current_resume_hash if approved_snapshot.get("resume_content_sha256") is not None else None,
+                        candidate_profile_sha256=current_profile_hash if approved_snapshot.get("candidate_profile_sha256") is not None else None,
+                        candidate_data=candidate_data if approved_snapshot.get("candidate_data") is not None else None,
+                        custom_answers=stored_custom_answers,
+                        form_questions=current_questions if expected_questions is not None else None,
+                    )
+                    if current_digest != expected_digest:
+                        reason = (
+                            "Approved input digest mismatch between approval and reconstruction. "
+                            "Failing closed to fresh human review."
+                        )
+                        logger.error("App #%d: %s", app.id, reason)
+                        return {"success": False, "error": reason}
+
+            # Re-fill using the *stored* custom answers — do not re-draft
+            fill_result: FillResult = adapter.fill(
+                app_ctx=app_ctx,
+                candidate_data=candidate_data,
+                resume_path=resume_path,
+                custom_answers=stored_custom_answers,
+            )
+
+            if not fill_result.success:
+                return {
+                    "success": False,
+                    "error": fill_result.error_reason or "Failed to reconstruct form state.",
+                }
+
+            return {
+                "success": True,
+                "app_ctx": app_ctx,
+                "adapter": adapter,
+                "fill_result": fill_result,
+            }
+
+        except Exception as exc:
+            logger.exception(
+                "reconstruct_form_state failed for App #%d: %s", application_id, exc
+            )
+            return {"success": False, "error": str(exc)}
+
 
     def confirm_and_submit(
         self,
@@ -562,16 +882,31 @@ class ApplicationFiller:
     def execute_browser_submission(self, session: Session, application_id: int) -> dict[str, Any]:
         """Orchestrate the autonomous browser submission for an explicitly approved application.
 
-        The application must have been claimed (``submission_claimed_at IS NOT NULL``) before
-        calling this method.  Approval was already validated by the claim step (M1).
+        Authorization model (M1 handoff repair):
+        - The application must have been atomically claimed (``submission_claimed_at IS NOT NULL``).
+        - Durable approval is ``approved_at IS NOT NULL`` — the human approval token is consumed
+          and cleared by ``confirm_and_submit`` and must NOT be passed to the adapter as a
+          credential. The token was single-use; its consumption is proof of approval, not its
+          presence.
+        - Form state is reconstructed via ``reconstruct_form_state()`` which operates on the
+          existing Application record without creating a duplicate or requiring READY_TO_APPLY.
         """
         app = session.get(Application, application_id)
         if app is None:
             raise ValueError(f"Application {application_id} not found.")
 
-        # M1: Check DB claim column instead of static token
+        # Gate 1: Must be atomically claimed
         if app.submission_claimed_at is None:
-            raise RuntimeError(f"Application #{app.id} must be claimed before executing browser submission")
+            raise RuntimeError(
+                f"Application #{app.id} must be claimed before executing browser submission"
+            )
+
+        # Gate 2: Durable approval must be present
+        if app.approved_at is None:
+            raise RuntimeError(
+                f"Application #{app.id} has no durable approval (approved_at is None). "
+                "confirm_and_submit() must be called before the worker can execute."
+            )
 
         if app.status == ApplicationStatus.SUBMITTED.value:
             return {"success": True, "already_submitted": True}
@@ -586,15 +921,6 @@ class ApplicationFiller:
         if opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
             raise ValueError(f"Cannot submit application for opportunity in status {opp.status!r}")
 
-        notes_data = {}
-        if app.notes:
-            try:
-                notes_data = json.loads(app.notes)
-            except Exception:
-                pass
-
-        # (claim was already validated above via submission_claimed_at)
-
         if self.adapter_override is not None:
             adapter = self.adapter_override
         else:
@@ -602,28 +928,54 @@ class ApplicationFiller:
         if not hasattr(adapter, "submit_application"):
             raise TypeError(f"Adapter {type(adapter).__name__} does not implement submit_application")
 
-        logger.info("Executing browser submission for App #%d (Opp #%d)", app.id, opp.id)
+        logger.info(
+            "Executing browser submission for App #%d (Opp #%d) — approved_at=%s, claimed_at=%s",
+            app.id, opp.id, app.approved_at, app.submission_claimed_at,
+        )
 
         try:
-            # 1. Reach the final review screen using the safe fill logic
-            fill_res = self.process_opportunity(session, opp.id)
-            if not fill_res.get("success"):
-                logger.error("Failed to reach final review screen: %s", fill_res)
-                return {"success": False, "error": "Could not recreate form state for submission"}
-            
-            app_ctx = fill_res.get("app_ctx")
-            if not app_ctx:
-                 return {"success": False, "error": "No ApplicationContext available from fill"}
+            # 1. Reconstruct the final review screen using stored fill data.
+            #    reconstruct_form_state operates on the existing Application record,
+            #    requires AWAITING_SUBMISSION (not READY_TO_APPLY), and reuses stored
+            #    custom answers — it does NOT create a duplicate Application row.
+            recon_res = self.reconstruct_form_state(session, app.id)
+            if not recon_res.get("success"):
+                reason = recon_res.get("error") or "Could not reconstruct form state for submission"
+                logger.error("Form state reconstruction failed for App #%d: %s", app.id, reason)
+                application_service.transition_application_status(
+                    session,
+                    app.id,
+                    ApplicationStatus.FAILED,
+                    notes=f"{app.notes}\n[RECONSTRUCT_ERROR]: {reason}",
+                    reason=reason,
+                )
+                opportunity_service.transition_status(
+                    session,
+                    opp.id,
+                    OpportunityStatus.MANUAL_APPLICATION_REQUIRED,
+                    reason=reason,
+                    actor="worker_submission",
+                )
+                session.commit()
+                return {"success": False, "status": "manual_required", "reason": reason}
 
-            # 2. Execute the actual click and verify confirmation
-            # Pass app.approval_token (server-issued UUID) as the execution ticket
-            submit_res = adapter.submit_application(app_ctx, approval_token=app.approval_token)
-            
+            app_ctx = recon_res.get("app_ctx")
+            if not app_ctx:
+                return {"success": False, "error": "No ApplicationContext returned from reconstruct_form_state"}
+
+            # 2. Execute the final submit action.
+            #    Authorization proof: approved_at IS NOT NULL (durable) +
+            #    submission_claimed_at IS NOT NULL (atomic exclusive claim).
+            #    The human approval token has been consumed — do NOT pass it here.
+            submit_res = adapter.submit_application(app_ctx)
+
             if not submit_res.get("success"):
-                # AMBIGUOUS TIMEOUT / FAILURE - FAIL CLOSED
+                # AMBIGUOUS TIMEOUT / FAILURE — FAIL CLOSED
+                # Do not automatically retry: a submission may have occurred before
+                # the process lost confirmation. Transition to manual review.
                 reason = submit_res.get("error") or "Submission failed or timed out ambiguously"
-                logger.error("Browser submission failed or ambiguous: %s", reason)
-                
+                logger.error("Browser submission failed/ambiguous for App #%d: %s", app.id, reason)
+
                 application_service.transition_application_status(
                     session,
                     app.id,
@@ -643,15 +995,18 @@ class ApplicationFiller:
 
             # VERIFIED SUCCESS
             now = datetime.now(timezone.utc)
-            conf_ref = submit_res.get("confirmation_ref") or f"BROWSER-{adapter.adapter_name.upper()}-CONFIRMED"
-            
-            # Evidence Capture
+            conf_ref = (
+                submit_res.get("confirmation_ref")
+                or f"BROWSER-{adapter.adapter_name.upper()}-CONFIRMED"
+            )
+
+            # Evidence capture (best-effort — never fail a verified submission over this)
             artifacts_dir = Path("artifacts/u7_submission_evidence")
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             evidence_file = artifacts_dir / f"app_{app.id}_{timestamp}_evidence.json"
             screenshot_file = artifacts_dir / f"app_{app.id}_{timestamp}_success.png"
-            
+
             evidence_data = {
                 "application_id": app.id,
                 "opportunity_id": opp.id,
@@ -660,9 +1015,9 @@ class ApplicationFiller:
                 "confirmation_ref": conf_ref,
                 "clicked_selector": submit_res.get("clicked_selector"),
                 "final_url": submit_res.get("url"),
-                "status": "verified_success"
+                "status": "verified_success",
             }
-            
+
             try:
                 page = app_ctx.browser_page
                 if page:
@@ -674,8 +1029,8 @@ class ApplicationFiller:
             with open(evidence_file, "w") as f:
                 json.dump(evidence_data, f, indent=2)
 
-            # Persist state
-            notes_data = {}
+            # Persist success state
+            notes_data: dict[str, Any] = {}
             if app.notes:
                 try:
                     notes_data = json.loads(app.notes)
@@ -690,7 +1045,7 @@ class ApplicationFiller:
                     "confirmation_ref": conf_ref,
                     "evidence_file": str(evidence_file),
                     "confirmed_at": now.isoformat(),
-                    "approved_by": notes_data.get("approved_by", "unknown"),
+                    "approved_by": app.approved_by or notes_data.get("approved_by", "unknown"),
                 },
             }
 
@@ -710,15 +1065,16 @@ class ApplicationFiller:
                 actor="worker_submission",
             )
             session.commit()
-            
+
             return {
                 "success": True,
                 "status": "applied",
                 "confirmed": True,
                 "confirmation_ref": conf_ref,
-                "evidence": str(evidence_file)
+                "evidence": str(evidence_file),
             }
 
         except Exception as e:
             logger.exception("Unexpected exception during execute_browser_submission: %s", e)
             return {"success": False, "error": str(e)}
+

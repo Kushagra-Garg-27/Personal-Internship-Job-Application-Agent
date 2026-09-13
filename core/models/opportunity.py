@@ -236,6 +236,20 @@ class Application(TimestampMixin, Base):
         String(100), nullable=True
     )  # worker-id that won the claim race
 
+    # ── M5: Revocation audit columns ──────────────────────────────────
+    # Set atomically by revoke_approval() when the operator cancels a
+    # pending approval before the worker claims it.  Clearing approved_at
+    # ensures the worker poll filter (approved_at IS NOT NULL) skips it.
+    approval_revoked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # set by revoke_approval(); NULL until explicitly revoked
+    approval_revoked_by: Mapped[str | None] = mapped_column(
+        String(100), nullable=True
+    )  # audit label of the operator who revoked
+    approval_revocation_reason: Mapped[str | None] = mapped_column(
+        String(500), nullable=True
+    )  # human-readable reason for revocation
+
     # ── Relationships ─────────────────────────────────────────────────
     opportunity: Mapped[Opportunity] = relationship(back_populates="applications")
     resume: Mapped["Resume"] = relationship(lazy="selectin")  # noqa: F821

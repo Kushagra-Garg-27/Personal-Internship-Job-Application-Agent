@@ -60,7 +60,7 @@ def db_session(engine) -> Generator[Session, None, None]:
 
 @pytest.fixture()
 def client(db_session: Session) -> Generator[TestClient, None, None]:
-    """FastAPI TestClient with the DB session overridden."""
+    """FastAPI TestClient with the DB session overridden and guard disabled for unit tests."""
 
     def _override_get_db():
         try:
@@ -69,9 +69,16 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
             pass  # session lifecycle managed by db_session fixture
 
     app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
+    original_mode = settings.SUBMISSION_GUARD_MODE
+    original_secret = settings.SUBMISSION_API_SECRET
+    settings.SUBMISSION_GUARD_MODE = "disabled"
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        settings.SUBMISSION_GUARD_MODE = original_mode
+        settings.SUBMISSION_API_SECRET = original_secret
+        app.dependency_overrides.clear()
 
 
 @pytest.fixture()

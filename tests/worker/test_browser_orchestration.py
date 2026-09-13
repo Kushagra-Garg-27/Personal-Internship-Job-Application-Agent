@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -14,7 +14,6 @@ from core.status import (
     ApplicationStatus,
     OpportunityStatus,
 )
-from core.tokens import generate_approval_token
 from worker.engine.filler import ApplicationFiller
 from worker.runner import WorkerRunner
 
@@ -27,7 +26,13 @@ def _create_awaiting_app(
     opp_status: str = OpportunityStatus.AWAITING_SUBMISSION.value,
     submission_claimed: bool = False,
 ) -> tuple[Opportunity, Application]:
-    """Helper: create an opportunity + application with M1 column-based approval state."""
+    """Helper: create an opportunity + application in its real post-confirmation state.
+
+    M1 handoff repair: after confirm_and_submit() the approval_token is consumed
+    (cleared to None) and approved_at is the durable authorization record.
+    This fixture correctly reflects that state — retaining a live token alongside
+    approved_at is the unrealistic configuration that masked the handoff defects.
+    """
     opp = Opportunity(
         dedup_hash=f"hash_browser_test_{dedup_suffix}",
         title="Software Engineer",
@@ -39,21 +44,18 @@ def _create_awaiting_app(
     db_session.add(opp)
     db_session.commit()
 
-    token = generate_approval_token() if with_approval else None
-    # Use naive UTC datetimes — SQLite stores naive, and SQLAlchemy's
-    # in-memory evaluator must compare like-for-like.
-    expires = (datetime.utcnow() + timedelta(minutes=30)) if with_approval else None
+    # Post-confirmation state: token is consumed (None), approved_at is set.
+    # Use naive UTC datetimes — SQLite stores naive.
     approved_at = datetime.utcnow() if with_approval else None
     claimed_at = datetime.utcnow() if submission_claimed else None
-
 
     app = Application(
         opportunity_id=opp.id,
         status=status,
         notes=json.dumps({"approved_by": "test_user"}),
-        # M1 approval columns
-        approval_token=token,
-        approval_token_expires_at=expires,
+        # M1 approval columns — token is consumed after confirmation
+        approval_token=None,          # cleared by confirm_and_submit (single-use)
+        approval_token_expires_at=None,  # cleared by confirm_and_submit
         approved_at=approved_at,
         approved_by="test_user" if with_approval else None,
         # M1 claim columns
@@ -207,8 +209,8 @@ def test_ambiguous_submission_not_automatically_eligible(db_session: Session):
 
     filler = ApplicationFiller()
     with patch("worker.engine.filler.resolve_adapter", return_value=mock_adapter):
-        with patch.object(filler, "process_opportunity") as mock_process:
-            mock_process.return_value = {"success": True, "app_ctx": MagicMock()}
+        with patch.object(filler, "reconstruct_form_state") as mock_recon:
+            mock_recon.return_value = {"success": True, "app_ctx": MagicMock()}
             result = filler.execute_browser_submission(db_session, app.id)
 
     assert result["success"] is False
@@ -257,8 +259,8 @@ def test_execute_browser_submission_success(mock_resolve_adapter, db_session: Se
     mock_resolve_adapter.return_value = mock_adapter
 
     filler = ApplicationFiller()
-    with patch.object(filler, "process_opportunity") as mock_process:
-        mock_process.return_value = {"success": True, "app_ctx": MagicMock()}
+    with patch.object(filler, "reconstruct_form_state") as mock_recon:
+        mock_recon.return_value = {"success": True, "app_ctx": MagicMock()}
 
         result = filler.execute_browser_submission(db_session, app.id)
 
@@ -294,8 +296,8 @@ def test_execute_browser_submission_ambiguous_failure(
     mock_resolve_adapter.return_value = mock_adapter
 
     filler = ApplicationFiller()
-    with patch.object(filler, "process_opportunity") as mock_process:
-        mock_process.return_value = {"success": True, "app_ctx": MagicMock()}
+    with patch.object(filler, "reconstruct_form_state") as mock_recon:
+        mock_recon.return_value = {"success": True, "app_ctx": MagicMock()}
 
         result = filler.execute_browser_submission(db_session, app.id)
 

@@ -16,6 +16,8 @@ import type {
   ApprovalTokenResponse,
   ConfirmSubmitRequest,
   ConfirmSubmitResponse,
+  PendingQueueItem,
+  RevokeApprovalResponse,
 } from '../types';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
@@ -276,5 +278,45 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+  },
+
+  /**
+   * M3.1: Check submission guard status and privileged approval guidance.
+   * Free of secrets.
+   */
+  async getGuardStatus(): Promise<{ mode: 'required' | 'disabled'; cli_command: string }> {
+    return request<{ mode: 'required' | 'disabled'; cli_command: string }>(
+      '/applications/guard-status'
+    );
+  },
+
+  // ── M5: Pending queue & revocation ─────────────────────────────────────
+
+  /**
+   * Return all applications in the pending-submission queue.
+   * Optional queueState filters by derived state. No secret required (read-only).
+   */
+  async getPendingQueue(queueState?: string): Promise<PendingQueueItem[]> {
+    const queryStr = queueState ? `?queue_state=${encodeURIComponent(queueState)}` : '';
+    return request<PendingQueueItem[]>(`/applications/pending-queue${queryStr}`);
+  },
+
+  /**
+   * Atomically revoke a pending approval before the worker claims it.
+   * Does NOT require the submission secret (revocation removes authority).
+   * Returns 409 if the worker already claimed the application.
+   */
+  async revokeApproval(
+    applicationId: number,
+    reason?: string,
+    revokedBy: string = 'human_operator',
+  ): Promise<RevokeApprovalResponse> {
+    return request<RevokeApprovalResponse>(
+      `/applications/${applicationId}/revoke-approval`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ revoked_by: revokedBy, reason: reason ?? null }),
+      },
+    );
   },
 };
