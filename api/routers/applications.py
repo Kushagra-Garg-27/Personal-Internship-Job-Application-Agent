@@ -237,12 +237,16 @@ def get_pending_queue(
         if queue_state and state.upper() != queue_state.upper():
             continue
 
-        confirmation_ref = None
-        if app.notes:
+        confirmation_ref = app.confirmation_ref
+        if not confirmation_ref and app.notes:
             try:
                 notes_data = json.loads(app.notes) if isinstance(app.notes, str) else app.notes
                 if isinstance(notes_data, dict):
-                    confirmation_ref = notes_data.get("confirmation_ref")
+                    sub_conf = notes_data.get("submission_confirmation")
+                    if isinstance(sub_conf, dict) and sub_conf.get("confirmation_ref"):
+                        confirmation_ref = sub_conf.get("confirmation_ref")
+                    elif notes_data.get("confirmation_ref"):
+                        confirmation_ref = notes_data.get("confirmation_ref")
             except Exception:
                 pass
 

@@ -367,8 +367,8 @@ class TestPendingQueueEndpoint:
         assert match["queue_state"] == "REVOKED"
         assert match["approval_revoked_by"] == "operator"
 
-    def test_submitted_app_in_queue_with_confirmation_ref(self, session: Session, open_client: TestClient):
-        """Submitted app derives SUBMITTED and extracts confirmation_ref."""
+    def test_confirmation_ref_from_dedicated_column_only(self, session: Session, open_client: TestClient):
+        """a. A submitted application with only app.confirmation_ref exposes that value."""
         opp = _make_opp(session, status=OpportunityStatus.APPLIED.value)
         app_obj = Application(
             opportunity_id=opp.id,
@@ -376,18 +376,138 @@ class TestPendingQueueEndpoint:
             attempt_number=1,
             approved_at=datetime.now(timezone.utc),
             submission_claimed_at=datetime.now(timezone.utc),
-            notes=json.dumps({"confirmation_ref": "CONF-12345"}),
+            confirmation_ref="CONF-COL-ONLY-999",
+            notes=None,
         )
         session.add(app_obj)
         session.commit()
 
         resp = open_client.get("/applications/pending-queue")
         assert resp.status_code == 200
-        items = resp.json()
-        match = next((i for i in items if i["application_id"] == app_obj.id), None)
-        assert match is not None
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
         assert match["queue_state"] == "SUBMITTED"
-        assert match["confirmation_ref"] == "CONF-12345"
+        assert match["confirmation_ref"] == "CONF-COL-ONLY-999"
+
+    def test_confirmation_ref_fallback_to_nested_submission_confirmation(self, session: Session, open_client: TestClient):
+        """b. A nested submission_confirmation.confirmation_ref is used as fallback when column is null."""
+        opp = _make_opp(session, status=OpportunityStatus.APPLIED.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.SUBMITTED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            submission_claimed_at=datetime.now(timezone.utc),
+            confirmation_ref=None,
+            notes=json.dumps({
+                "submission_confirmation": {
+                    "confirmation_ref": "CONF-NESTED-FALLBACK-123",
+                    "submitted_url": "https://example.com/done",
+                }
+            }),
+        )
+        session.add(app_obj)
+        session.commit()
+
+        resp = open_client.get("/applications/pending-queue")
+        assert resp.status_code == 200
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
+        assert match["queue_state"] == "SUBMITTED"
+        assert match["confirmation_ref"] == "CONF-NESTED-FALLBACK-123"
+
+    def test_confirmation_ref_fallback_to_legacy_top_level_notes(self, session: Session, open_client: TestClient):
+        """c. The legacy top-level notes value still works when column and nested key are absent."""
+        opp = _make_opp(session, status=OpportunityStatus.APPLIED.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.SUBMITTED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            submission_claimed_at=datetime.now(timezone.utc),
+            confirmation_ref=None,
+            notes=json.dumps({"confirmation_ref": "CONF-LEGACY-TOP-LEVEL"}),
+        )
+        session.add(app_obj)
+        session.commit()
+
+        resp = open_client.get("/applications/pending-queue")
+        assert resp.status_code == 200
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
+        assert match["queue_state"] == "SUBMITTED"
+        assert match["confirmation_ref"] == "CONF-LEGACY-TOP-LEVEL"
+
+    def test_confirmation_ref_column_wins_when_all_disagree(self, session: Session, open_client: TestClient):
+        """d. The dedicated database column wins when column, nested notes, and legacy notes all disagree."""
+        opp = _make_opp(session, status=OpportunityStatus.APPLIED.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.SUBMITTED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            submission_claimed_at=datetime.now(timezone.utc),
+            confirmation_ref="CONF-DB-WINNER",
+            notes=json.dumps({
+                "submission_confirmation": {"confirmation_ref": "CONF-NESTED-LOSER"},
+                "confirmation_ref": "CONF-LEGACY-LOSER",
+            }),
+        )
+        session.add(app_obj)
+        session.commit()
+
+        resp = open_client.get("/applications/pending-queue")
+        assert resp.status_code == 200
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
+        assert match["confirmation_ref"] == "CONF-DB-WINNER"
+
+    def test_confirmation_ref_malformed_notes_harmless(self, session: Session, open_client: TestClient):
+        """e. Malformed/non-JSON notes do not cause a 500 response and resolve confirmation_ref safely."""
+        opp = _make_opp(session, status=OpportunityStatus.APPLIED.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.SUBMITTED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            submission_claimed_at=datetime.now(timezone.utc),
+            confirmation_ref=None,
+            notes="not-a-json-string-{{{invalid",
+        )
+        session.add(app_obj)
+        session.commit()
+
+        resp = open_client.get("/applications/pending-queue")
+        assert resp.status_code == 200
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
+        assert match["confirmation_ref"] is None
+
+    def test_no_other_notes_content_returned_in_queue_response(self, session: Session, open_client: TestClient):
+        """f. No other notes content (internal logs, errors, payload data) is returned by the queue response."""
+        opp = _make_opp(session, status=OpportunityStatus.APPLIED.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.SUBMITTED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            submission_claimed_at=datetime.now(timezone.utc),
+            confirmation_ref="CONF-SECURE-99",
+            notes=json.dumps({
+                "private_internal_notes": "sensitive recruiter message",
+                "custom_answers": [{"q": "why hire you", "a": "private answer"}],
+                "stack_trace": "internal execution details",
+            }),
+        )
+        session.add(app_obj)
+        session.commit()
+
+        resp = open_client.get("/applications/pending-queue")
+        assert resp.status_code == 200
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
+        assert "private_internal_notes" not in match
+        assert "custom_answers" not in match
+        assert "stack_trace" not in match
+        assert "notes" not in match
+        payload_str = json.dumps(match)
+        assert "sensitive recruiter message" not in payload_str
+        assert "private answer" not in payload_str
+        assert "internal execution details" not in payload_str
 
     def test_server_side_queue_state_filter(self, session: Session, open_client: TestClient):
         """Query param ?queue_state= filters items server-side."""
@@ -587,3 +707,224 @@ class TestWorkerSkipsRevoked:
         assert won is True
         session.refresh(app_obj)
         assert app_obj.submission_claimed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Worker Claim Status Allowlist Tests (Fail-Closed)
+# ---------------------------------------------------------------------------
+
+class TestWorkerClaimEligibility:
+    """Proves fail-closed claim eligibility in WorkerRunner (real SQLite database)."""
+
+    def test_form_filled_can_be_claimed(self, session: Session):
+        """a. FORM_FILLED can be claimed when approved and opportunity is AWAITING_SUBMISSION."""
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.FORM_FILLED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+        )
+        session.add(app_obj)
+        session.commit()
+
+        runner = WorkerRunner()
+        won = runner.claim_application_for_submission(session, app_obj.id, worker_id="worker-1")
+        assert won is True
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is not None
+        assert app_obj.claimed_by == "worker-1"
+
+    def test_pending_can_be_claimed(self, session: Session):
+        """b. PENDING can be claimed when approved and opportunity is AWAITING_SUBMISSION."""
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.PENDING.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+        )
+        session.add(app_obj)
+        session.commit()
+
+        runner = WorkerRunner()
+        won = runner.claim_application_for_submission(session, app_obj.id, worker_id="worker-2")
+        assert won is True
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is not None
+        assert app_obj.claimed_by == "worker-2"
+
+    def test_failed_cannot_be_claimed_even_when_approved_and_awaiting_submission(self, session: Session):
+        """c. FAILED cannot be claimed even when approved_at is non-null and opp is AWAITING_SUBMISSION."""
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.FAILED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+        )
+        session.add(app_obj)
+        session.commit()
+
+        runner = WorkerRunner()
+        won = runner.claim_application_for_submission(session, app_obj.id, worker_id="worker-3")
+        assert won is False
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is None
+        assert app_obj.claimed_by is None
+
+    def test_submitted_cannot_be_claimed(self, session: Session):
+        """d. SUBMITTED cannot be claimed."""
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.SUBMITTED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+        )
+        session.add(app_obj)
+        session.commit()
+
+        runner = WorkerRunner()
+        won = runner.claim_application_for_submission(session, app_obj.id, worker_id="worker-4")
+        assert won is False
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is None
+        assert app_obj.claimed_by is None
+
+    def test_unexpected_status_cannot_be_claimed(self, session: Session):
+        """e. Any other unexpected application status cannot be claimed."""
+        from sqlalchemy import text
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.PENDING.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+        )
+        session.add(app_obj)
+        session.commit()
+
+        # Update DB directly to simulate an unexpected status stored in the table
+        session.execute(
+            text("UPDATE applications SET status = 'unexpected_or_withdrawn' WHERE id = :id"),
+            {"id": app_obj.id},
+        )
+        session.commit()
+        session.expire(app_obj)
+
+        runner = WorkerRunner()
+        won = runner.claim_application_for_submission(session, app_obj.id, worker_id="worker-5")
+        assert won is False
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is None
+        assert app_obj.claimed_by is None
+
+    def test_rejected_claim_leaves_claimed_fields_null(self, session: Session):
+        """f. A rejected claim leaves submission_claimed_at and claimed_by null in the database."""
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.FAILED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+            submission_claimed_at=None,
+            claimed_by=None,
+        )
+        session.add(app_obj)
+        session.commit()
+
+        runner = WorkerRunner()
+        won = runner.claim_application_for_submission(session, app_obj.id, worker_id="worker-fail")
+        assert won is False
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is None
+        assert app_obj.claimed_by is None
+
+    def test_poll_and_submit_queue_skips_failed_and_ineligible(self, session: Session):
+        """g. poll_and_submit_queue() does not call execute_browser_submission() for failed or ineligible apps."""
+        from worker.runner import WorkerRunner
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_failed = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.FAILED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            approved_by="operator",
+        )
+        session.add(app_failed)
+        session.commit()
+
+        runner = WorkerRunner()
+        mock_filler = MagicMock()
+        runner.filler = mock_filler
+
+        results = runner.poll_and_submit_queue(session)
+        assert results == []
+        mock_filler.execute_browser_submission.assert_not_called()
+        session.refresh(app_failed)
+        assert app_failed.submission_claimed_at is None
+        assert app_failed.claimed_by is None
+
+    def test_real_sql_update_predicate_rejects_non_claimable_status(self, session: Session):
+        """Proves the atomic SQL UPDATE predicate fails at the SQLite DB level for non-claimable status."""
+        from sqlalchemy import update, or_
+        from core.models.opportunity import Application
+
+        opp = _make_opp(session, status=OpportunityStatus.AWAITING_SUBMISSION.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.FAILED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            submission_claimed_at=None,
+        )
+        session.add(app_obj)
+        session.commit()
+
+        claimable_statuses = [
+            ApplicationStatus.FORM_FILLED.value,
+            ApplicationStatus.PENDING.value,
+        ]
+        stmt = (
+            update(Application)
+            .where(
+                Application.id == app_obj.id,
+                Application.submission_claimed_at.is_(None),
+                Application.approved_at.is_not(None),
+                or_(
+                    Application.approval_revoked_at.is_(None),
+                    Application.approved_at > Application.approval_revoked_at,
+                ),
+                Application.status.in_(claimable_statuses),
+            )
+            .values(
+                submission_claimed_at=datetime.utcnow(),
+                claimed_by="direct-sql-worker",
+            )
+        )
+        result = session.execute(stmt)
+        session.commit()
+        assert result.rowcount == 0
+        session.refresh(app_obj)
+        assert app_obj.submission_claimed_at is None
+        assert app_obj.claimed_by is None

@@ -91,8 +91,12 @@ class WorkerRunner:
         if app is None:
             return False
 
-        # Pre-flight: already submitted or already claimed?
-        if app.status == ApplicationStatus.SUBMITTED.value:
+        # Pre-flight: fail-closed allowlist for claimable application statuses
+        claimable_statuses = [
+            ApplicationStatus.FORM_FILLED.value,
+            ApplicationStatus.PENDING.value,
+        ]
+        if app.status not in claimable_statuses:
             return False
         if app.submission_claimed_at is not None:
             return False
@@ -121,6 +125,7 @@ class WorkerRunner:
         # approved_at IS NOT NULL is the durable authorization signal (token may be
         # already consumed / cleared by confirm_and_submit).
         # Also ensures no active (un-superseded) revocation is present.
+        # Fail-closed allowlist: only FORM_FILLED or PENDING applications can be claimed.
         stmt = (
             update(Application)
             .where(
@@ -131,7 +136,7 @@ class WorkerRunner:
                     Application.approval_revoked_at.is_(None),
                     Application.approved_at > Application.approval_revoked_at,
                 ),
-                Application.status != ApplicationStatus.SUBMITTED.value,
+                Application.status.in_(claimable_statuses),
             )
             .values(
                 submission_claimed_at=now_naive,
@@ -170,8 +175,11 @@ class WorkerRunner:
                 if app is None:
                     continue
 
-                # Skip already-submitted
-                if app.status == ApplicationStatus.SUBMITTED.value:
+                # Skip non-claimable / terminal applications
+                if app.status not in (
+                    ApplicationStatus.FORM_FILLED.value,
+                    ApplicationStatus.PENDING.value,
+                ):
                     continue
 
                 # M1: Validate durable approval (approved_at is set by
