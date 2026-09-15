@@ -1,0 +1,33 @@
+<!-- PROVENANCE: SYNTHETIC FIXTURE FOR M2A VALIDATION (DO NOT TREAT AS LIVE UNSTOP DOM EVIDENCE) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Synthetic Test: Newsletter Form After Application Form</title>
+</head>
+<body>
+  <main>
+    <div class="application-container">
+      <h1>Data Analyst Internship Registration</h1>
+      <form id="reg-form" action="/internships/123/register" method="POST">
+        <div class="form-group">
+          <label for="name">Name</label>
+          <input type="text" id="name" name="name" value="Alex Smith" required />
+        </div>
+        <div class="actions">
+          <button type="button" id="unstop_submit">Complete Registration</button>
+        </div>
+      </form>
+    </div>
+  </main>
+
+  <footer>
+    <!-- Newsletter subscription form following the application form -->
+    <form id="newsletter-form" class="newsletter-subscription" action="/newsletter/subscribe" method="POST">
+      <label for="nl-email">Subscribe to job alerts</label>
+      <input type="email" id="nl-email" name="subscribe_email" placeholder="Your email" />
+      <button type="submit" id="btn-subscribe">Subscribe</button>
+    </form>
+  </footer>
+</body>
+</html>

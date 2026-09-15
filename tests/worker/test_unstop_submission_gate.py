@@ -34,7 +34,7 @@ from worker.adapters.unstop import UnstopAdapter
 from worker.engine.filler import ApplicationFiller
 
 
-# ── Fake Playwright doubles ───────────────────────────────────────────────
+# ── Fake Playwright doubles (Distinct DOM Control Model) ─────────────────
 
 class _FakeElement:
     def __init__(self, page, visible=True, enabled=True):
@@ -47,6 +47,43 @@ class _FakeElement:
 
     def is_enabled(self):
         return self._enabled
+
+    def evaluate(self, script, *args):
+        if "isConnected" in script:
+            return True
+        if "other" in script and "===" in script:
+            return True
+        if "(el, f)" in script and "closest" in script:
+            return True
+        return {
+            "tag_name": "button",
+            "raw_text": "Complete Registration",
+            "control_type": "button",
+            "element_id": "unstop_submit",
+            "name": None,
+            "role": "button",
+            "aria_label": None,
+            "title": None,
+            "data_testid": None,
+            "is_disabled": not self._enabled,
+            "is_visible": self._visible,
+            "form_action": "/register",
+            "form_method": "POST",
+            "is_in_active_form": True,
+            "has_form": True,
+            "form_id": "reg-form",
+            "css_classes": ["submit-btn"],
+        }
+
+    def evaluate_handle(self, script, *args):
+        # Returns a mock JSHandle wrapping this element (non-null, valid).
+        # as_element() must return a non-None handle to satisfy the ElementHandle gate.
+        class _FakeJSHandle:
+            def __init__(self, elem):
+                self._elem = elem
+            def as_element(self):
+                return self._elem
+        return _FakeJSHandle(self)
 
     def click(self):
         self._page.clicks.append("submit")
@@ -64,13 +101,13 @@ class _FakeLocator:
         sel = self._selector
         if "challenges.cloudflare" in sel or "challenge-stage" in sel:
             return 0
-        if sel in UnstopAdapter.SUBMISSION_SELECTORS:
+        if "input:not([type='hidden'])" in sel or "form textarea" in sel:
+            # Inputs are visible on registration page, absent once confirmed
+            return 0 if self._page.confirmation_shown else 1
+        if sel in ("#unstop_submit", "button", "form button") or "Complete Registration" in sel or "Submit Application" in sel:
             return 1 if self._page.submit_present else 0
-        if sel.startswith("text="):
-            wanted = sel[len("text="):].strip("'\"")
-            if wanted in ("Successfully Registered",) and self._page.confirmation_shown:
-                return 1
-            return 0
+        if "Successfully Registered" in sel and self._page.confirmation_shown:
+            return 1
         return 0
 
     @property
@@ -80,9 +117,21 @@ class _FakeLocator:
     def nth(self, _i):
         return _FakeElement(self._page)
 
+    def is_visible(self):
+        return self.first.is_visible()
+
+    def is_enabled(self):
+        return self.first.is_enabled()
+
+    def evaluate(self, script, *args):
+        return self.first.evaluate(script, *args)
+
+    def click(self):
+        return self.first.click()
+
 
 class _FakePage:
-    """Minimal stand-in for a Playwright page on the Unstop register form."""
+    """Distinct DOM stand-in for a Playwright page on the Unstop register form."""
 
     def __init__(self, url="https://unstop.com/competitions/1753995/register"):
         self.url = url
@@ -92,6 +141,37 @@ class _FakePage:
 
     def locator(self, selector):
         return _FakeLocator(self, selector)
+
+    def query_selector_all(self, selector):
+        if not self.submit_present:
+            return []
+        return [_FakeElement(self)]
+
+    def evaluate(self, script, *args):
+        # Return realistic distinct candidates for inspect_submission_controls
+        if not self.submit_present:
+            return []
+        return [
+            {
+                "index": 0,
+                "tag_name": "button",
+                "raw_text": "Complete Registration",
+                "control_type": "button",
+                "element_id": "unstop_submit",
+                "name": None,
+                "role": "button",
+                "aria_label": None,
+                "title": None,
+                "data_testid": None,
+                "is_disabled": False,
+                "is_visible": True,
+                "form_action": "/register",
+                "form_method": "POST",
+                "is_in_active_form": True,
+                "selector_strategy": "form button",
+                "css_classes": ["submit-btn"],
+            }
+        ]
 
     def wait_for_timeout(self, _ms):
         return None

@@ -1,0 +1,36 @@
+<!-- PROVENANCE: SYNTHETIC FIXTURE FOR M2A VALIDATION (DO NOT TREAT AS LIVE UNSTOP DOM EVIDENCE) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Synthetic Test: Header Search Form Before Application Form</title>
+</head>
+<body>
+  <header>
+    <!-- Header search form preceding the application form -->
+    <form id="global-search-form" role="search" action="/search" method="GET">
+      <input type="search" name="q" placeholder="Search internships, jobs, hackathons..." />
+      <button type="submit" id="btn-search">Search</button>
+    </form>
+  </header>
+
+  <main>
+    <div class="application-container">
+      <h1>Frontend Developer Application</h1>
+      <form id="active-application-form" action="/jobs/frontend-dev/apply" method="POST">
+        <div class="form-group">
+          <label for="applicant-name">Full Name</label>
+          <input type="text" id="applicant-name" name="full_name" value="Jane Doe" required />
+        </div>
+        <div class="form-group">
+          <label for="applicant-email">Email</label>
+          <input type="email" id="applicant-email" name="email" value="jane@example.com" required />
+        </div>
+        <div class="actions">
+          <button type="button" id="unstop_submit">Submit Application</button>
+        </div>
+      </form>
+    </div>
+  </main>
+</body>
+</html>

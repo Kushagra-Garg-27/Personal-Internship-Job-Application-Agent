@@ -1,0 +1,23 @@
+<!-- PROVENANCE: SYNTHETIC FIXTURE FOR M2A VALIDATION (DO NOT TREAT AS LIVE UNSTOP DOM EVIDENCE) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Synthetic Test: Multiple Ambiguous Final Controls</title>
+</head>
+<body>
+  <div class="registration-form">
+    <form id="reg-form">
+      <div class="field">
+        <label for="ans">Question Answer</label>
+        <input type="text" id="ans" name="ans" />
+      </div>
+      <div class="actions">
+        <!-- Ambiguous: two final submit buttons present in the same form -->
+        <button type="button" id="submit-1" class="btn">Submit Application</button>
+        <button type="button" id="submit-2" class="btn">Complete Registration</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from core.config import settings
 from core.discovery.base import RawOpportunity
@@ -28,6 +30,12 @@ from worker.adapters.base import (
     ExtractedListing,
     FillResult,
     SubmissionStatus,
+)
+from worker.adapters.submission_controls import (
+    SubmissionControlResolutionStatus,
+    redact_url,
+    revalidate_handle_before_click,
+    resolve_final_submission_control,
 )
 from worker.security.storage import load_decrypted_storage_state
 
@@ -1275,71 +1283,11 @@ class UnstopAdapter(BasePlatformAdapter):
             return SubmissionStatus(confirmed=False, status="unknown", detail="No active browser page")
 
         try:
-            # 1. Hard confirmation signals rendered by Unstop after a successful
-            #    registration (confirmation screen / success URL).
-            url = (page.url or "").lower()
-            url_confirmed = any(
-                marker in url for marker in ("success", "/registered", "thank-you", "confirmation")
-            )
+            return evaluate_submission_confirmation(page, opportunity_id=app_ctx.opportunity_id)
+        except Exception:
+            return SubmissionStatus(confirmed=False, status="ambiguous", detail="confirmation_probe_failed")
 
-            confirmed_selectors = [
-                "text='Successfully Registered'",
-                "text='Registration Successful'",
-                "text='You have successfully registered'",
-                "text='Application Submitted'",
-                "text='Application Completed'",
-                "text='Already Registered'",
-                "text='Registered Successfully'",
-                "text='Your application has been submitted'",
-                "text='Thank you for registering'",
-            ]
-            matched: str | None = None
-            for sel in confirmed_selectors:
-                loc = page.locator(sel)
-                try:
-                    if loc.count() > 0 and loc.first.is_visible():
-                        matched = sel
-                        break
-                except Exception:
-                    continue
-
-            if matched or url_confirmed:
-                return SubmissionStatus(
-                    confirmed=True,
-                    status="confirmed",
-                    confirmation_ref=f"UNSTOP-CONFIRMED-{app_ctx.opportunity_id}",
-                    detail=(
-                        f"Unstop confirmed submission via {matched or 'success URL'} "
-                        f"(url={page.url})."
-                    ),
-                )
-
-            # 2. Explicit pre-submit state: form still open and unsubmitted.
-            if page.url and "/register" in page.url:
-                return SubmissionStatus(
-                    confirmed=False,
-                    status="not_submitted",
-                    detail="Unstop registration form is still open and unsubmitted.",
-                )
-
-            # 3. Anything else is genuinely ambiguous — never treated as success.
-            return SubmissionStatus(
-                confirmed=False,
-                status="ambiguous",
-                detail=f"No Unstop confirmation signal observed at url={page.url}.",
-            )
-        except Exception as exc:
-            return SubmissionStatus(confirmed=False, status="ambiguous", detail=str(exc))
-
-    # ── Explicit human-approved submission boundary (U4) ──────────────────
-    #
-    # The default fill() contract leaves the browser open and NEVER submits.
-    # submit_application() is the single, explicitly named method that may
-    # click the final control, and it is callable ONLY by passing the exact
-    # human approval token after the human has reviewed the filled form.
-    # Everything else — ready_for_review, a valid form, a successful autofill,
-    # a prior instruction, a test run, a timeout, a default, or an agent
-    # assumption — fails closed here.
+    # ── Explicit human-approved submission boundary (U4 / M2A) ─────────────
 
     def submit_application(
         self,
@@ -1353,20 +1301,17 @@ class UnstopAdapter(BasePlatformAdapter):
           - ``approved_at IS NOT NULL``: human explicitly confirmed submission
           - ``submission_claimed_at IS NOT NULL``: atomic exclusive worker claim
 
-        The human approval token is consumed (cleared) by ``confirm_and_submit``
-        and must NOT be passed here. String-length checks on a parameter are
-        not a meaningful authorization boundary — the orchestrator is.
+        Control resolution model (M2A):
+        Uses ``resolve_final_submission_control`` to find exactly one verified,
+        visible, enabled final submit control. Fails closed without clicking if
+        zero, multiple, disabled, hidden, intermediate, or ambiguous controls are found.
 
-        Parameters
-        ----------
-        app_ctx : ApplicationContext
-            Live context holding the filled, reviewed page.
-
-        Returns
-        -------
-        dict[str, Any]
-            ``{"success", "confirmed", "confirmation_ref", "detail", ...}``.
-            ``success`` is True only when Unstop itself reported confirmation.
+        Safety gates (in order):
+        1. Origin gate: page.url must be a valid Unstop HTTPS origin.
+        2. Challenge gate: no Cloudflare/bot challenges.
+        3. check_status() pre-gate: confirmed→already_confirmed, not_submitted→continue,
+           all other states fail closed with zero clicks.
+        4. Control resolution and revalidation before single click.
         """
         page = app_ctx.browser_page
 
@@ -1374,52 +1319,236 @@ class UnstopAdapter(BasePlatformAdapter):
             return {
                 "success": False,
                 "confirmed": False,
-                "error": "No active browser page available for Unstop submission.",
+                "error": "no_browser_page",
             }
 
-        # Fail closed on bot challenges — never attempt to bypass them.
-        if page.locator("iframe[src*='challenges.cloudflare'], div#challenge-stage").count() > 0:
+        # ── Gate 1: Explicit origin check ─────────────────────────────────────
+        # Must happen first, before any control resolution or click path.
+        # Invalid origin returns submission_origin_invalid with zero clicks.
+        try:
+            current_url = getattr(page, "url", None) or ""
+        except Exception:
+            current_url = ""
+
+        if not is_valid_unstop_origin(current_url):
             return {
                 "success": False,
                 "confirmed": False,
-                "error": "Cloudflare bot verification present; human interaction required. Not bypassed.",
+                "error": "submission_origin_invalid",
             }
 
-        # Refuse to submit twice on the same live page.
-        pre_status = self.check_status(app_ctx)
-        if pre_status.confirmed:
+        # ── Gate 2: Fail closed on bot challenges ──────────────────────────────
+        if not callable(getattr(page, "locator", None)):
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "challenge_probe_failed",
+            }
+        try:
+            challenge_loc = page.locator("iframe[src*='challenges.cloudflare'], div#challenge-stage")
+            if not callable(getattr(challenge_loc, "count", None)):
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "error": "challenge_probe_failed",
+                }
+            count = challenge_loc.count()
+            if not isinstance(count, int):
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "error": "challenge_probe_failed",
+                }
+            if count > 0:
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "error": "challenge_detected",
+                }
+        except Exception:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "challenge_probe_failed",
+            }
+
+        # ── Gate 3: Mandatory check_status() pre-submission safety gate ────────
+        # confirmed=True  → return already_confirmed, zero clicks.
+        # status exactly "not_submitted" → may continue to control resolution.
+        # ambiguous / unknown / unauthenticated / exceptions / probe failures /
+        # any other unexpected status → fail closed, zero clicks.
+        try:
+            pre_status = self.check_status(app_ctx)
+        except Exception:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_status_probe_failed",
+            }
+
+        # Structural & type verification:
+        # pre_status must have expected structure, confirmed must be exactly a bool, status a string
+        if (
+            not hasattr(pre_status, "confirmed")
+            or not hasattr(pre_status, "status")
+            or type(pre_status.confirmed) is not bool
+            or not isinstance(pre_status.status, str)
+        ):
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_status_probe_failed",
+            }
+
+        if pre_status.confirmed is True:
             return {
                 "success": True,
                 "confirmed": True,
                 "already_confirmed": True,
-                "confirmation_ref": pre_status.confirmation_ref,
-                "detail": pre_status.detail,
+                "confirmation_ref": getattr(pre_status, "confirmation_ref", None),
+                "detail": getattr(pre_status, "detail", "already_confirmed"),
             }
 
-        clicked: str | None = None
-        last_error: str | None = None
-        for sel in self.SUBMISSION_SELECTORS:
-            loc = page.locator(sel)
-            try:
-                if loc.count() == 0:
-                    continue
-                btn = loc.first
-                if not btn.is_visible():
-                    continue
-                if not btn.is_enabled():
-                    continue
-                btn.click()
-                clicked = sel
-                break
-            except Exception as exc:
-                last_error = f"{sel}: {exc}"
-                continue
-
-        if clicked is None:
+        # Proceeding requires confirmed is False and status == "not_submitted"
+        if not (pre_status.confirmed is False and pre_status.status == "not_submitted"):
+            allowed_status_codes = {
+                "ambiguous", "unauthenticated", "unknown",
+                "not_submitted", "confirmed",
+            }
+            safe_status = pre_status.status if pre_status.status in allowed_status_codes else "pre_status_unexpected"
             return {
                 "success": False,
                 "confirmed": False,
-                "error": f"No enabled Unstop submit control found. Last error: {last_error}",
+                "error": f"pre_status_not_allowed:{safe_status}",
+            }
+
+        # ── Gate 4: Resolve the unique, verified final submission control ──────
+        resolution = resolve_final_submission_control(page)
+        if resolution.status != SubmissionControlResolutionStatus.EXACTLY_ONE_FINAL or resolution.locator is None:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": f"resolution_failed:{resolution.status.value}",
+                "resolution_status": resolution.status.value,
+            }
+
+        # M2A Revalidation: strictly revalidate the live element handle immediately before click
+        is_reval_valid, reval_reason = revalidate_handle_before_click(
+            page, resolution.locator, resolution.verified_control, expected_form_handle=resolution.form_handle
+        )
+        if not is_reval_valid:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": f"revalidation_failed:{reval_reason}",
+                "resolution_status": f"revalidation_failed:{reval_reason}",
+            }
+
+        # ── Final Pre-Click Safety Envelope ──────────────────────────────────
+        # Re-verify origin, bot challenges, and platform status immediately before click.
+        # Zero clicks on any violation.
+        try:
+            pre_click_url = getattr(page, "url", None) or ""
+        except Exception:
+            pre_click_url = ""
+
+        if not is_valid_unstop_origin(pre_click_url):
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_click_origin_invalid",
+            }
+
+        if not callable(getattr(page, "locator", None)):
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_click_challenge_probe_failed",
+            }
+        try:
+            pre_click_challenge_loc = page.locator("iframe[src*='challenges.cloudflare'], div#challenge-stage")
+            if not callable(getattr(pre_click_challenge_loc, "count", None)):
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "error": "pre_click_challenge_probe_failed",
+                }
+            pre_click_count = pre_click_challenge_loc.count()
+            if not isinstance(pre_click_count, int):
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "error": "pre_click_challenge_probe_failed",
+                }
+            if pre_click_count > 0:
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "error": "pre_click_challenge_detected",
+                }
+        except Exception:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_click_challenge_probe_failed",
+            }
+
+        try:
+            pre_click_status = self.check_status(app_ctx)
+        except Exception:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_click_status_probe_failed",
+            }
+
+        if (
+            not hasattr(pre_click_status, "confirmed")
+            or not hasattr(pre_click_status, "status")
+            or type(pre_click_status.confirmed) is not bool
+            or not isinstance(pre_click_status.status, str)
+        ):
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_click_status_probe_failed",
+            }
+
+        if pre_click_status.confirmed is True:
+            return {
+                "success": True,
+                "confirmed": True,
+                "already_confirmed": True,
+                "confirmation_ref": getattr(pre_click_status, "confirmation_ref", None),
+                "detail": getattr(pre_click_status, "detail", "already_confirmed"),
+            }
+
+        if not (pre_click_status.confirmed is False and pre_click_status.status == "not_submitted"):
+            allowed_status_codes = {
+                "ambiguous", "unauthenticated", "unknown",
+                "not_submitted", "confirmed",
+            }
+            safe_status = pre_click_status.status if pre_click_status.status in allowed_status_codes else "pre_status_unexpected"
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "pre_click_status_not_allowed",
+                "detail": f"pre_click_status_not_allowed:{safe_status}",
+            }
+
+        # Perform exactly one click on the unique verified and revalidated handle
+        clicked_identifier: str = (
+            resolution.verified_control.candidate_id
+            if resolution.verified_control
+            else "resolved_control"
+        )
+        try:
+            resolution.locator.click()
+        except Exception:
+            return {
+                "success": False,
+                "confirmed": False,
+                "error": "control_click_failed",
             }
 
         # Confirm the result by observing the platform, never by assuming that
@@ -1430,8 +1559,8 @@ class UnstopAdapter(BasePlatformAdapter):
             "confirmed": bool(confirmation.confirmed),
             "confirmation_ref": confirmation.confirmation_ref,
             "detail": confirmation.detail,
-            "clicked_selector": clicked,
-            "url": page.url,
+            "clicked_selector": clicked_identifier,
+            "url": redact_url(getattr(page, "url", "")),
         }
 
     def wait_for_confirmation(
@@ -1453,7 +1582,8 @@ class UnstopAdapter(BasePlatformAdapter):
             if last.confirmed:
                 return last
             try:
-                page.wait_for_timeout(poll_ms)
+                if hasattr(page, "wait_for_timeout"):
+                    page.wait_for_timeout(poll_ms)
             except Exception:
                 break
             elapsed += poll_ms
@@ -1468,3 +1598,231 @@ class UnstopAdapter(BasePlatformAdapter):
             ),
         )
 
+
+def is_valid_unstop_origin(url: str | None) -> bool:
+    """Validate that a URL belongs strictly to an authorized HTTPS Unstop origin.
+
+    Requirements:
+    - scheme must be exactly 'https'
+    - hostname must be 'unstop.com' or end with '.unstop.com'
+    - hostname is None or empty fails closed
+    - embedded credentials (user:pass@) are rejected
+    - lookalikes like 'unstop.com.evil.test' are rejected
+    - port must be None or 443; malformed or alternative ports fail closed
+    """
+    if not url:
+        return False
+    try:
+        parsed = urlsplit(str(url).strip())
+        scheme = (parsed.scheme or "").lower()
+        if scheme != "https":
+            return False
+        if parsed.username or parsed.password:
+            return False
+        hostname = (parsed.hostname or "").lower()
+        if not hostname:
+            return False
+        if hostname != "unstop.com" and not hostname.endswith(".unstop.com"):
+            return False
+        if parsed.port is not None and parsed.port != 443:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def evaluate_submission_confirmation(
+    page: Any,
+    opportunity_id: int | None = None,
+) -> SubmissionStatus:
+    """Evaluate whether an active browser page exhibits verifiable Unstop confirmation evidence.
+
+    Hardenings (M2A):
+    - Origin verification: scheme must be HTTPS and hostname must be unstop.com or *.unstop.com.
+    - Rejects foreign origins, http, file://, lookalike domains, or missing URLs.
+    - Rejects login / auth redirects on real Unstop origin as unconfirmed.
+    - Rejects generic substring matches in query parameters (e.g. ?source=success or ?ref=confirmation).
+    - Requires known sanitized confirmation route pattern or visible, specific confirmation message.
+    - Rejects if registration form input fields remain visible on the page.
+    - Rejects hidden confirmation elements.
+    - Mandatory probes: missing probe methods fail closed with fixed reason codes.
+    - Fails closed as 'not_submitted' or 'ambiguous' on any uncertainty or probe exception.
+    """
+    if page is None:
+        return SubmissionStatus(confirmed=False, status="unknown", detail="No active browser page")
+
+    raw_url = getattr(page, "url", None) or ""
+    if not is_valid_unstop_origin(raw_url):
+        return SubmissionStatus(
+            confirmed=False,
+            status="ambiguous",
+            detail="unauthorized_origin",
+        )
+
+    try:
+        parsed = urlsplit(raw_url)
+        path = parsed.path.lower().rstrip("/")
+    except Exception:
+        path = ""
+
+    # Check for login / auth redirect on the Unstop origin
+    if "/login" in path or "/auth" in path:
+        return SubmissionStatus(
+            confirmed=False,
+            status="unauthenticated",
+            detail="unauthenticated_redirect",
+        )
+
+    # 1. Reject if active registration inputs are still visible (fail closed on probe errors)
+    has_unsubmitted_inputs = False
+    try:
+        if not hasattr(page, "locator") or not callable(getattr(page, "locator", None)):
+            return SubmissionStatus(
+                confirmed=False,
+                status="ambiguous",
+                detail="input_probe_failed",
+            )
+        inputs = page.locator("form input:not([type='hidden']), form textarea")
+        if not hasattr(inputs, "count") or not callable(getattr(inputs, "count", None)):
+            return SubmissionStatus(
+                confirmed=False,
+                status="ambiguous",
+                detail="input_probe_failed",
+            )
+        count = inputs.count()
+        if not isinstance(count, int):
+            return SubmissionStatus(
+                confirmed=False,
+                status="ambiguous",
+                detail="input_probe_failed",
+            )
+        if count > 0:
+            if not hasattr(inputs, "nth") or not callable(getattr(inputs, "nth", None)):
+                return SubmissionStatus(
+                    confirmed=False,
+                    status="ambiguous",
+                    detail="input_probe_failed",
+                )
+            for i in range(count):
+                el = inputs.nth(i)
+                if not hasattr(el, "is_visible") or not callable(getattr(el, "is_visible", None)):
+                    return SubmissionStatus(
+                        confirmed=False,
+                        status="ambiguous",
+                        detail="input_probe_failed",
+                    )
+                if el.is_visible():
+                    has_unsubmitted_inputs = True
+                    break
+    except Exception:
+        return SubmissionStatus(
+            confirmed=False,
+            status="ambiguous",
+            detail="input_probe_failed",
+        )
+
+    if has_unsubmitted_inputs:
+        return SubmissionStatus(
+            confirmed=False,
+            status="not_submitted",
+            detail="form_inputs_visible",
+        )
+
+    # 2. Check path-only URL evidence (NEVER query string or fragment)
+    url_confirmed = False
+    recognized_endings = (
+        "/register/success",
+        "/application/success",
+        "/application/submitted",
+        "/registration/success",
+    )
+    if any(path.endswith(ending) for ending in recognized_endings):
+        url_confirmed = True
+    elif re.search(r"/(competitions|jobs|internships)/[^/]+/(register|application)/(success|submitted)$", path):
+        url_confirmed = True
+
+    # 3. Check visible confirmation text component supported by platform (fail closed on probe errors)
+    CONFIRMATION_PHRASES = (
+        "Successfully Registered",
+        "Registration Successful",
+        "You have successfully registered",
+        "Your application has been submitted",
+        "Application Submitted Successfully",
+        "Application Received",
+        "Thank you for registering",
+    )
+    text_confirmed = False
+
+    if not hasattr(page, "locator") or not callable(getattr(page, "locator", None)):
+        return SubmissionStatus(
+            confirmed=False,
+            status="ambiguous",
+            detail="visibility_probe_failed",
+        )
+
+    for phrase in CONFIRMATION_PHRASES:
+        try:
+            loc = page.locator(f"text='{phrase}'")
+            if not hasattr(loc, "count") or not callable(getattr(loc, "count", None)):
+                return SubmissionStatus(
+                    confirmed=False,
+                    status="ambiguous",
+                    detail="visibility_probe_failed",
+                )
+            count = loc.count()
+            if not isinstance(count, int):
+                return SubmissionStatus(
+                    confirmed=False,
+                    status="ambiguous",
+                    detail="visibility_probe_failed",
+                )
+            if count > 0:
+                if not hasattr(loc, "nth") or not callable(getattr(loc, "nth", None)):
+                    return SubmissionStatus(
+                        confirmed=False,
+                        status="ambiguous",
+                        detail="visibility_probe_failed",
+                    )
+                for i in range(count):
+                    el = loc.nth(i)
+                    if not hasattr(el, "is_visible") or not callable(getattr(el, "is_visible", None)):
+                        return SubmissionStatus(
+                            confirmed=False,
+                            status="ambiguous",
+                            detail="visibility_probe_failed",
+                        )
+                    if el.is_visible():
+                        text_confirmed = True
+                        break
+            if text_confirmed:
+                break
+        except Exception:
+            return SubmissionStatus(
+                confirmed=False,
+                status="ambiguous",
+                detail="visibility_probe_failed",
+            )
+
+    if url_confirmed or text_confirmed:
+        ref = f"UNSTOP-CONFIRMED-{opportunity_id}" if opportunity_id else "UNSTOP-CONFIRMED"
+        return SubmissionStatus(
+            confirmed=True,
+            status="confirmed",
+            confirmation_ref=ref,
+            detail="submission_confirmed_success",
+        )
+
+    # 4. Explicit pre-submit route
+    if path.endswith("/register") or "/register/" in path or "/apply" in path:
+        return SubmissionStatus(
+            confirmed=False,
+            status="not_submitted",
+            detail="form_open_unsubmitted",
+        )
+
+    # 5. Ambiguous: no verified signal
+    return SubmissionStatus(
+        confirmed=False,
+        status="ambiguous",
+        detail="confirmation_not_detected",
+    )

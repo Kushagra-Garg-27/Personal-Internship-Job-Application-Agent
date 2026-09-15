@@ -1,0 +1,24 @@
+<!-- PROVENANCE: SYNTHETIC FIXTURE FOR M2A VALIDATION (DO NOT TREAT AS LIVE UNSTOP DOM EVIDENCE) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Synthetic Test: Hidden Final Submit and Visible Continue Control</title>
+</head>
+<body>
+  <div class="registration-form">
+    <form id="reg-form">
+      <div class="field">
+        <label for="city">City</label>
+        <input type="text" id="city" name="city" />
+      </div>
+      <div class="actions">
+        <!-- Visible intermediate step button -->
+        <button type="button" class="btn btn-primary" id="btn-continue">Continue</button>
+        <!-- Final button is hidden in the DOM for this step -->
+        <button type="button" id="final-submit" style="display: none;">Submit Application</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>
