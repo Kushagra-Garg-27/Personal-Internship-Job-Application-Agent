@@ -100,6 +100,11 @@ ALLOWED_CLASSES = {
     "active",
 }
 
+# Canonical candidate-control selector shared across inspection and readiness detection
+CANDIDATE_CONTROL_SELECTOR = (
+    "button, input[type='submit'], input[type='button'], [role='button']"
+)
+
 
 def hash_attribute(val: str | None, prefix: str = "attr") -> str | None:
     """Deterministically hash attribute string."""
@@ -570,9 +575,7 @@ def inspect_submission_controls(page: Any) -> list[tuple[SubmissionControlCandid
         raise RuntimeError("mandatory_page_methods_missing")
 
     try:
-        handles = page.query_selector_all(
-            "button, input[type='submit'], input[type='button'], [role='button']"
-        )
+        handles = page.query_selector_all(CANDIDATE_CONTROL_SELECTOR)
     except Exception as exc:
         raise RuntimeError(f"handle_acquisition_failed: {type(exc).__name__}") from exc
 
