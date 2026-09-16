@@ -1425,6 +1425,44 @@ class UnstopAdapter(BasePlatformAdapter):
         # ── Gate 4: Resolve the unique, verified final submission control ──────
         resolution = resolve_final_submission_control(page)
         if resolution.status != SubmissionControlResolutionStatus.EXACTLY_ONE_FINAL or resolution.locator is None:
+            # M2C: An unresolved final boundary is not a retryable browser
+            # failure.  This is deliberately limited to resolver outcomes; the
+            # origin, challenge, status, and inspection-probe gates above retain
+            # their own bounded safety codes.
+            manual_reason_by_status = {
+                SubmissionControlResolutionStatus.ONLY_INTERMEDIATE_OR_UNKNOWN: "ambiguous_controls",
+                SubmissionControlResolutionStatus.ZERO_FINAL: "no_final_control",
+                SubmissionControlResolutionStatus.MULTIPLE_FINAL: "multiple_final_controls",
+                SubmissionControlResolutionStatus.FINAL_DISABLED: "final_control_disabled",
+                SubmissionControlResolutionStatus.FINAL_HIDDEN: "final_control_hidden",
+            }
+            manual_reason = manual_reason_by_status.get(resolution.status)
+            if manual_reason is not None:
+                # A visible enabled generic Next is ambiguous even when it is
+                # outside the active form.  It is never clicked or promoted to
+                # FINAL_SUBMIT; this check only selects the bounded handoff code.
+                has_visible_enabled_next = any(
+                    candidate.text == "next"
+                    and candidate.is_visible is True
+                    and candidate.is_disabled is False
+                    for candidate in resolution.candidates
+                )
+                if (
+                    has_visible_enabled_next
+                    and resolution.status in {
+                        SubmissionControlResolutionStatus.ONLY_INTERMEDIATE_OR_UNKNOWN,
+                        SubmissionControlResolutionStatus.ZERO_FINAL,
+                    }
+                ):
+                    manual_reason = "ambiguous_next_control"
+                return {
+                    "success": False,
+                    "confirmed": False,
+                    "manual_review_required": True,
+                    "error": "manual_final_action_required",
+                    "reason": manual_reason,
+                    "resolution_status": resolution.status.value,
+                }
             return {
                 "success": False,
                 "confirmed": False,

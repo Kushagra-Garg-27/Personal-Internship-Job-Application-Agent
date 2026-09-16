@@ -207,7 +207,16 @@ class WorkerRunner:
                     logger.info("Application #%d was already claimed by another worker; skipping.", app.id)
                     continue
 
-                res = self.filler.execute_browser_submission(session, app.id)
+                # Carry the exact persisted identity of the claim we just won
+                # across the browser boundary; do not let the filler infer it
+                # from a possibly stale identity map.
+                session.refresh(app)
+                res = self.filler.execute_browser_submission(
+                    session,
+                    app.id,
+                    expected_claimed_by=worker_id,
+                    expected_submission_claimed_at=app.submission_claimed_at,
+                )
                 results.append(res)
             except Exception as exc:
                 logger.exception("Error submitting opportunity #%d: %s", opp.id, exc)

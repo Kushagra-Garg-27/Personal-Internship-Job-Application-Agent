@@ -212,6 +212,10 @@ class Application(TimestampMixin, Base):
     confirmation_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     adapter_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # M2C: bounded, non-sensitive reason for a terminal worker-to-human
+    # handoff.  Kept separate from notes so existing approval/input evidence is
+    # never overwritten by browser diagnostics.
+    manual_review_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # ── M1: Hardened approval-token columns ────────────────────────────
     # These replace the old practice of storing approval/claim state inside

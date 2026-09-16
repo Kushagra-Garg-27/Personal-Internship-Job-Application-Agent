@@ -879,7 +879,14 @@ class ApplicationFiller:
             "submitted_at": now.isoformat(),
         }
 
-    def execute_browser_submission(self, session: Session, application_id: int) -> dict[str, Any]:
+    def execute_browser_submission(
+        self,
+        session: Session,
+        application_id: int,
+        *,
+        expected_claimed_by: str | None = None,
+        expected_submission_claimed_at: datetime | None = None,
+    ) -> dict[str, Any]:
         """Orchestrate the autonomous browser submission for an explicitly approved application.
 
         Authorization model (M1 handoff repair):
@@ -891,7 +898,10 @@ class ApplicationFiller:
         - Form state is reconstructed via ``reconstruct_form_state()`` which operates on the
           existing Application record without creating a duplicate or requiring READY_TO_APPLY.
         """
-        app = session.get(Application, application_id)
+        # Force a database refresh at the execution boundary.  The expected
+        # identity still comes exclusively from the worker that won the claim;
+        # it is never reconstructed from this fresh row.
+        app = session.get(Application, application_id, populate_existing=True)
         if app is None:
             raise ValueError(f"Application {application_id} not found.")
 
@@ -900,6 +910,19 @@ class ApplicationFiller:
             raise RuntimeError(
                 f"Application #{app.id} must be claimed before executing browser submission"
             )
+
+        if (
+            not isinstance(expected_claimed_by, str)
+            or not expected_claimed_by.strip()
+            or not isinstance(expected_submission_claimed_at, datetime)
+            or app.claimed_by != expected_claimed_by
+            or app.submission_claimed_at != expected_submission_claimed_at
+        ):
+            return {
+                "success": False,
+                "status": "stale_claim",
+                "reason": "manual_final_action_transition_rejected",
+            }
 
         # Gate 2: Durable approval must be present
         if app.approved_at is None:
@@ -970,6 +993,33 @@ class ApplicationFiller:
             submit_res = adapter.submit_application(app_ctx)
 
             if not submit_res.get("success"):
+                if (
+                    submit_res.get("manual_review_required") is True
+                    and submit_res.get("error") == "manual_final_action_required"
+                    and isinstance(submit_res.get("reason"), str)
+                ):
+                    manual_reason = submit_res.get("reason")
+                    transitioned = application_service.handoff_claimed_application_to_manual_review(
+                        session,
+                        app.id,
+                        reason=manual_reason,
+                        expected_claimed_by=expected_claimed_by,
+                        expected_submission_claimed_at=expected_submission_claimed_at,
+                    )
+                    if not transitioned:
+                        session.rollback()
+                        return {
+                            "success": False,
+                            "status": "stale_claim",
+                            "reason": "manual_final_action_transition_rejected",
+                        }
+                    session.commit()
+                    return {
+                        "success": False,
+                        "status": "manual_required",
+                        "reason": f"manual_final_action_required:{manual_reason}",
+                    }
+
                 # AMBIGUOUS TIMEOUT / FAILURE — FAIL CLOSED
                 # Do not automatically retry: a submission may have occurred before
                 # the process lost confirmation. Transition to manual review.
@@ -1074,7 +1124,14 @@ class ApplicationFiller:
                 "evidence": str(evidence_file),
             }
 
-        except Exception as e:
-            logger.exception("Unexpected exception during execute_browser_submission: %s", e)
-            return {"success": False, "error": str(e)}
+        except Exception:
+            # A failed application/opportunity transition must never be left
+            # half-persisted for a later caller to commit.
+            session.rollback()
+            logger.exception("Unexpected exception during execute_browser_submission")
+            return {
+                "success": False,
+                "status": "error",
+                "reason": "browser_submission_execution_failed",
+            }
 

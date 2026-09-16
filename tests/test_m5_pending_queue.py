@@ -346,6 +346,53 @@ class TestPendingQueueEndpoint:
         assert match["queue_state"] == "CLAIMED_IN_PROGRESS"
         assert match["claimed_by"] == "worker-1"
 
+    def test_manual_handoff_exposes_only_bounded_reason(self, session: Session, open_client: TestClient):
+        opp = _make_opp(session, status=OpportunityStatus.MANUAL_APPLICATION_REQUIRED.value)
+        app_obj = Application(
+            opportunity_id=opp.id,
+            status=ApplicationStatus.FAILED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            manual_review_reason="ambiguous_next_control",
+            notes='{"approved_input_digest":"preserved"}',
+        )
+        session.add(app_obj)
+        session.commit()
+
+        resp = open_client.get("/applications/pending-queue")
+        assert resp.status_code == 200
+        match = next(i for i in resp.json() if i["application_id"] == app_obj.id)
+        assert match["queue_state"] == "MANUAL_REVIEW"
+        assert match["manual_review_reason"] == "ambiguous_next_control"
+        assert "notes" not in match
+        assert "approved_input_digest" not in str(match)
+
+    def test_queue_omits_unbounded_or_nonmanual_reason(self, session: Session, open_client: TestClient):
+        manual_opp = _make_opp(session, status=OpportunityStatus.MANUAL_APPLICATION_REQUIRED.value)
+        manual = Application(
+            opportunity_id=manual_opp.id,
+            status=ApplicationStatus.FAILED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            manual_review_reason="raw-selector-or-session-detail",
+        )
+        pending_opp = _make_opp(session)
+        pending = Application(
+            opportunity_id=pending_opp.id,
+            status=ApplicationStatus.FORM_FILLED.value,
+            attempt_number=1,
+            approved_at=datetime.now(timezone.utc),
+            manual_review_reason="ambiguous_next_control",
+        )
+        session.add_all([manual, pending])
+        session.commit()
+
+        items = {item["application_id"]: item for item in open_client.get("/applications/pending-queue").json()}
+        assert items[manual.id]["queue_state"] == "MANUAL_REVIEW"
+        assert items[manual.id]["manual_review_reason"] is None
+        assert items[pending.id]["queue_state"] == "APPROVED_PENDING"
+        assert items[pending.id]["manual_review_reason"] is None
+
     def test_revoked_app_visible_for_audit(self, session: Session, open_client: TestClient):
         opp = _make_opp(session)
         app_obj = Application(

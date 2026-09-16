@@ -11,6 +11,15 @@ import {
 import type { PendingQueueItem } from '../types';
 import { api } from '../api/client';
 
+const MANUAL_REVIEW_LABELS: Record<string, string> = {
+  ambiguous_next_control: 'Final action needs manual review',
+  ambiguous_controls: 'Application controls need manual review',
+  no_final_control: 'Final submission control not found',
+  multiple_final_controls: 'Multiple final controls detected',
+  final_control_disabled: 'Final control is disabled',
+  final_control_hidden: 'Final control is hidden',
+};
+
 export const SubmissionQueuePage: React.FC = () => {
   const [items, setItems] = useState<PendingQueueItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -590,6 +599,15 @@ export const SubmissionQueuePage: React.FC = () => {
                       <span style={{ color: 'var(--text-tertiary, #6b7280)', display: 'block' }}>Confirmation Ref:</span>
                       <span style={{ color: 'var(--emerald-400, #34d399)', fontFamily: 'monospace' }}>
                         {item.confirmation_ref}
+                      </span>
+                    </div>
+                  )}
+
+                  {isManual && item.manual_review_reason && (
+                    <div>
+                      <span style={{ color: 'var(--text-tertiary, #6b7280)', display: 'block' }}>Manual Review Reason:</span>
+                      <span style={{ color: '#fb923c', fontFamily: 'monospace' }}>
+                        {MANUAL_REVIEW_LABELS[item.manual_review_reason] || 'Manual review required'}
                       </span>
                     </div>
                   )}

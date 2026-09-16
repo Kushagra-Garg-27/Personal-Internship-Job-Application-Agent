@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base
 
 from core.models.opportunity import Application
@@ -104,4 +104,47 @@ def test_orm_mapping_matches_migrated_columns(alembic_config):
     assert db_cols["approval_revoked_at"]["nullable"] is True
     assert db_cols["approval_revoked_by"]["nullable"] is True
     assert db_cols["approval_revocation_reason"]["nullable"] is True
+    engine.dispose()
+
+
+def test_migration_0013_manual_review_reason_round_trip(alembic_config):
+    """0013 adds one nullable bounded-reason column and cleanly round-trips."""
+    cfg, db_url = alembic_config
+    command.upgrade(cfg, "0012")
+    command.upgrade(cfg, "0013")
+
+    engine = create_engine(db_url)
+    column = next(
+        col for col in inspect(engine).get_columns("applications")
+        if col["name"] == "manual_review_reason"
+    )
+    assert column["nullable"] is True
+    assert "VARCHAR(100)" in str(column["type"]).upper()
+
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO opportunities
+                (dedup_hash, status, reliability_tier, title, company)
+            VALUES
+                ('m2c-migration-round-trip', 'awaiting_submission', 'experimental', 'Role', 'Company')
+        """))
+        conn.execute(text("""
+            INSERT INTO applications
+                (opportunity_id, attempt_number, status, manual_review_reason)
+            VALUES
+                (1, 1, 'failed', 'ambiguous_next_control')
+        """))
+        assert conn.scalar(text("SELECT manual_review_reason FROM applications WHERE id = 1")) == (
+            "ambiguous_next_control"
+        )
+
+    command.downgrade(cfg, "0012")
+    assert "manual_review_reason" not in {
+        col["name"] for col in inspect(engine).get_columns("applications")
+    }
+
+    command.upgrade(cfg, "0013")
+    assert "manual_review_reason" in {
+        col["name"] for col in inspect(engine).get_columns("applications")
+    }
     engine.dispose()

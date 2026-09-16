@@ -30,6 +30,7 @@ from worker.adapters.submission_controls import (
     resolve_final_submission_control,
     revalidate_handle_before_click,
     sanitize_attribute_value,
+    FINAL_SUBMIT_TEXTS,
 )
 from worker.adapters.unstop import (
     UnstopAdapter,
@@ -408,10 +409,73 @@ class TestAdapterSubmitExecution:
 
         res = adapter.submit_application(ctx)
         assert res["success"] is False
-        assert "resolution_failed" in res["error"]
+        assert res["error"] == "manual_final_action_required"
+        assert res["manual_review_required"] is True
+        assert res["reason"] == "ambiguous_controls"
 
         click_count = page.evaluate("() => window.__CLICK_COUNT || 0")
         assert click_count == 0, f"Expected 0 clicks, got {click_count}"
+
+    def test_next_outside_active_form_requires_manual_handoff_without_click(self, page):
+        """A visible enabled Next outside the form is an ambiguous handoff, never a click target."""
+        html = """
+        <button type="button" onclick="window.__CLICK_COUNT = (window.__CLICK_COUNT || 0) + 1">Next</button>
+        <form><input type="text" name="name" value="Test" /></form>
+        """
+        set_offline_page(page, html, "https://unstop.com/jobs/123")
+        adapter = UnstopAdapter()
+        ctx = ApplicationContext(
+            opportunity_id=123,
+            listing_url="https://unstop.com/jobs/123",
+            adapter_name="unstop",
+            tier=adapter.tier,
+            browser_page=page,
+        )
+
+        res = adapter.submit_application(ctx)
+        assert res == {
+            "success": False,
+            "confirmed": False,
+            "manual_review_required": True,
+            "error": "manual_final_action_required",
+            "reason": "ambiguous_next_control",
+            "resolution_status": "zero_final",
+        }
+        assert page.evaluate("() => window.__CLICK_COUNT || 0") == 0
+
+    @pytest.mark.parametrize(
+        ("controls", "expected_reason"),
+        [
+            ("<button disabled>Next</button>", "ambiguous_controls"),
+            ("<button hidden>Next</button>", "ambiguous_controls"),
+            ("<button>Back</button>", "ambiguous_controls"),
+            ("<button>Do Something</button>", "ambiguous_controls"),
+            ("", "no_final_control"),
+            ("<button disabled>Submit Application</button>", "final_control_disabled"),
+            ("<button hidden>Complete Registration</button>", "final_control_hidden"),
+        ],
+    )
+    def test_manual_reason_is_bounded_and_accurate(self, page, controls, expected_reason):
+        """Unresolved controls map to their distinct bounded handoff code with no click."""
+        html = f"""
+        <form><input type="text" name="name" value="Test" />{controls}</form>
+        """
+        set_offline_page(page, html, "https://unstop.com/jobs/123")
+        adapter = UnstopAdapter()
+        ctx = ApplicationContext(
+            opportunity_id=123,
+            listing_url="https://unstop.com/jobs/123",
+            adapter_name="unstop",
+            tier=adapter.tier,
+            browser_page=page,
+        )
+
+        res = adapter.submit_application(ctx)
+        assert res["success"] is False
+        assert res["manual_review_required"] is True
+        assert res["error"] == "manual_final_action_required"
+        assert res["reason"] == expected_reason
+        assert page.evaluate("() => window.__CLICK_COUNT || 0") == 0
 
     def test_submit_application_zero_clicks_on_multiple_controls_fixture(self, page):
         """When multiple final controls exist, submit_application performs 0 clicks."""
@@ -436,6 +500,8 @@ class TestAdapterSubmitExecution:
 
         res = adapter.submit_application(ctx)
         assert res["success"] is False
+        assert res["manual_review_required"] is True
+        assert res["reason"] == "multiple_final_controls"
         assert "multiple_final" in res.get("resolution_status", "")
 
         click_count = page.evaluate("() => window.__CLICK_COUNT || 0")
@@ -610,6 +676,20 @@ class TestSafetyInvariants:
             if isinstance(node, ast.Call):
                 if isinstance(node.func, ast.Attribute) and node.func.attr == "submit_application":
                     pytest.fail("CRITICAL INVARIANT VIOLATION: fill() calls submit_application()!")
+
+    def test_final_submit_source_never_treats_next_as_clickable_final_action(self):
+        """Static invariant: the only click in submit_application uses the resolved final handle."""
+        assert "next" not in FINAL_SUBMIT_TEXTS
+        source = textwrap.dedent(inspect.getsource(UnstopAdapter.submit_application))
+        tree = ast.parse(source)
+        click_calls = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "click"
+        ]
+        assert len(click_calls) == 1
+        assert ast.unparse(click_calls[0].func.value) == "resolution.locator"
 
     def test_submit_application_signature_has_no_approval_token_param(self):
         """M1 invariant: submit_application has no fake approval_token parameter."""
@@ -2185,4 +2265,3 @@ class TestAncestorChainVisibility:
         resolution = resolve_final_submission_control(page)
         assert resolution.status == SubmissionControlResolutionStatus.FINAL_HIDDEN
         assert resolution.locator is None
-

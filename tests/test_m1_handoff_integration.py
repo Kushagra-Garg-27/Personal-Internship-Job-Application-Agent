@@ -97,6 +97,21 @@ def _make_form_filled_app(db_session: Session, opp: Opportunity) -> Application:
     return app
 
 
+def _execute_claimed(
+    filler: ApplicationFiller, db_session: Session, app: Application
+) -> dict:
+    """Execute using the exact persisted claim captured by the test worker."""
+    db_session.refresh(app)
+    assert app.claimed_by is not None
+    assert app.submission_claimed_at is not None
+    return filler.execute_browser_submission(
+        db_session,
+        app.id,
+        expected_claimed_by=app.claimed_by,
+        expected_submission_claimed_at=app.submission_claimed_at,
+    )
+
+
 def _mock_adapter(success: bool = True):
     mock_adapter = MagicMock()
     mock_adapter.adapter_name = "unstop"
@@ -220,7 +235,12 @@ class TestPollingDiscovery:
         runner = WorkerRunner(filler=filler_mock)
         results = runner.poll_and_submit_queue(db_session, worker_id="poller_test")
         assert len(results) == 1
-        filler_mock.execute_browser_submission.assert_called_once_with(db_session, app.id)
+        filler_mock.execute_browser_submission.assert_called_once_with(
+            db_session,
+            app.id,
+            expected_claimed_by="poller_test",
+            expected_submission_claimed_at=app.submission_claimed_at,
+        )
 
     def test_unapproved_application_skipped(self, db_session: Session):
         opp = _make_opportunity(db_session, "skip_unapproved")
@@ -264,7 +284,7 @@ class TestExecuteAuthorizationGates:
 
         filler = ApplicationFiller()
         with pytest.raises(RuntimeError, match="no durable approval"):
-            filler.execute_browser_submission(db_session, app.id)
+            _execute_claimed(filler, db_session, app)
 
     def test_claimed_app_executes_without_approval_token(self, db_session: Session):
         opp = _make_opportunity(db_session, "claimed_no_token")
@@ -285,7 +305,7 @@ class TestExecuteAuthorizationGates:
         mock_adapter.submit_application.return_value = {"success": True, "confirmation_ref": "REF-OK"}
         filler = ApplicationFiller(adapter_override=mock_adapter)
         with patch("worker.engine.filler.resolve_adapter", return_value=mock_adapter):
-            result = filler.execute_browser_submission(db_session, app.id)
+            result = _execute_claimed(filler, db_session, app)
 
         assert result["success"] is True
         # Called WITHOUT approval_token keyword
@@ -374,7 +394,7 @@ class TestReconstructFormState:
         filler = ApplicationFiller(adapter_override=mock_adapter)
         with patch.object(filler, "reconstruct_form_state") as mock_recon:
             mock_recon.return_value = {"success": False, "error": "Browser crashed"}
-            result = filler.execute_browser_submission(db_session, app.id)
+            result = _execute_claimed(filler, db_session, app)
 
         assert result["success"] is False
         assert result["status"] == "manual_required"
@@ -451,7 +471,7 @@ class TestFailureAndAmbiguity:
                     "error": "Timeout waiting for Unstop confirmation",
                 }
                 mock_resolve.return_value = mock_adapter
-                result = filler.execute_browser_submission(db_session, app.id)
+                result = _execute_claimed(filler, db_session, app)
 
         assert result["success"] is False
         assert result["status"] == "manual_required"
@@ -679,7 +699,7 @@ class TestInvariant1CallPath:
         mock_adapter = MagicMock()
         filler = ApplicationFiller(adapter_override=mock_adapter)
         with pytest.raises(RuntimeError, match="no durable approval"):
-            filler.execute_browser_submission(db_session, app.id)
+            _execute_claimed(filler, db_session, app)
 
         mock_adapter.submit_application.assert_not_called()
 
@@ -731,7 +751,7 @@ class TestInvariant2ApprovedFormCorrespondence:
 
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -772,7 +792,7 @@ class TestInvariant2ApprovedFormCorrespondence:
 
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -797,7 +817,7 @@ class TestInvariant2ApprovedFormCorrespondence:
 
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -830,7 +850,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         mock_adapter.extract.return_value = ctx.extracted
 
         filler = ApplicationFiller(adapter_override=mock_adapter)
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -878,7 +898,7 @@ class TestInvariant2ApprovedFormCorrespondence:
 
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -932,7 +952,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
         count_before = db_session.query(Application).count()
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -993,7 +1013,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
         count_before = db_session.query(Application).count()
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is True
         assert res["status"] == "applied"
@@ -1051,7 +1071,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -1103,7 +1123,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
         with patch("worker.engine.filler.compute_file_sha256", side_effect=PermissionError("Permission denied")):
-            res = filler.execute_browser_submission(db_session, app.id)
+            res = _execute_claimed(filler, db_session, app)
 
         assert res["success"] is False
         assert res["status"] == "manual_required"
@@ -1159,7 +1179,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
         assert res["success"] is False
         assert res["status"] == "manual_required"
         assert "Resume content mismatch" in res["reason"]
@@ -1214,7 +1234,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
-        res = filler.execute_browser_submission(db_session, app.id)
+        res = _execute_claimed(filler, db_session, app)
         assert res["success"] is False
         assert res["status"] == "manual_required"
         assert "Resume selection mismatch" in res["reason"]
@@ -1267,7 +1287,7 @@ class TestInvariant2ApprovedFormCorrespondence:
         mock_adapter, _ = _mock_adapter()
         filler = ApplicationFiller(adapter_override=mock_adapter)
 
-        filler.execute_browser_submission(db_session, app.id)
+        _execute_claimed(filler, db_session, app)
 
         assert mock_adapter.fill.call_count == 0
         assert mock_adapter.submit_application.call_count == 0

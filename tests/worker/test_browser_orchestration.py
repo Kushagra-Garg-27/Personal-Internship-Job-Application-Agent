@@ -67,6 +67,16 @@ def _create_awaiting_app(
     return opp, app
 
 
+def _claim_identity(app: Application) -> dict[str, object]:
+    """Return the exact persisted worker claim required at execution time."""
+    assert app.claimed_by is not None
+    assert app.submission_claimed_at is not None
+    return {
+        "expected_claimed_by": app.claimed_by,
+        "expected_submission_claimed_at": app.submission_claimed_at,
+    }
+
+
 def test_poll_and_submit_queue_finds_and_claims_approved_apps(db_session: Session):
     """WorkerRunner.poll_and_submit_queue claims and executes an approved application (M1)."""
     opp, app = _create_awaiting_app(db_session, dedup_suffix="find_approved")
@@ -80,7 +90,12 @@ def test_poll_and_submit_queue_finds_and_claims_approved_apps(db_session: Sessio
     assert len(results) == 1
     assert results[0] == {"success": True}
     # M1: no approval_token positional arg — worker reads from DB column
-    filler_mock.execute_browser_submission.assert_called_once_with(db_session, app.id)
+    filler_mock.execute_browser_submission.assert_called_once_with(
+        db_session,
+        app.id,
+        expected_claimed_by="worker_test",
+        expected_submission_claimed_at=app.submission_claimed_at,
+    )
 
     db_session.refresh(app)
     # M1: claim stored in column, not notes JSON
@@ -211,7 +226,7 @@ def test_ambiguous_submission_not_automatically_eligible(db_session: Session):
     with patch("worker.engine.filler.resolve_adapter", return_value=mock_adapter):
         with patch.object(filler, "reconstruct_form_state") as mock_recon:
             mock_recon.return_value = {"success": True, "app_ctx": MagicMock()}
-            result = filler.execute_browser_submission(db_session, app.id)
+            result = filler.execute_browser_submission(db_session, app.id, **_claim_identity(app))
 
     assert result["success"] is False
     assert result["status"] == "manual_required"
@@ -262,7 +277,7 @@ def test_execute_browser_submission_success(mock_resolve_adapter, db_session: Se
     with patch.object(filler, "reconstruct_form_state") as mock_recon:
         mock_recon.return_value = {"success": True, "app_ctx": MagicMock()}
 
-        result = filler.execute_browser_submission(db_session, app.id)
+        result = filler.execute_browser_submission(db_session, app.id, **_claim_identity(app))
 
     assert result["success"] is True
     assert result["status"] == "applied"
@@ -299,7 +314,7 @@ def test_execute_browser_submission_ambiguous_failure(
     with patch.object(filler, "reconstruct_form_state") as mock_recon:
         mock_recon.return_value = {"success": True, "app_ctx": MagicMock()}
 
-        result = filler.execute_browser_submission(db_session, app.id)
+        result = filler.execute_browser_submission(db_session, app.id, **_claim_identity(app))
 
     assert result["success"] is False
     assert result["status"] == "manual_required"
@@ -309,3 +324,79 @@ def test_execute_browser_submission_ambiguous_failure(
 
     assert app.status == ApplicationStatus.FAILED.value
     assert opp.status == OpportunityStatus.MANUAL_APPLICATION_REQUIRED.value
+
+
+@patch("worker.engine.filler.resolve_adapter")
+def test_structured_manual_handoff_releases_claim_and_preserves_evidence(
+    mock_resolve_adapter, db_session: Session
+):
+    """M2C manual handoff is terminal, bounded, and leaves durable approval evidence intact."""
+    opp, app = _create_awaiting_app(
+        db_session, dedup_suffix="m2c_manual_handoff", submission_claimed=True
+    )
+    approved_at = app.approved_at
+    approved_by = app.approved_by
+    original_notes = app.notes
+
+    mock_adapter = MagicMock()
+    mock_adapter.adapter_name = "unstop"
+    mock_adapter.submit_application.return_value = {
+        "success": False,
+        "confirmed": False,
+        "manual_review_required": True,
+        "error": "manual_final_action_required",
+        "reason": "ambiguous_next_control",
+    }
+    mock_resolve_adapter.return_value = mock_adapter
+
+    filler = ApplicationFiller()
+    with patch.object(filler, "reconstruct_form_state", return_value={"success": True, "app_ctx": MagicMock()}):
+        result = filler.execute_browser_submission(db_session, app.id, **_claim_identity(app))
+
+    assert result == {
+        "success": False,
+        "status": "manual_required",
+        "reason": "manual_final_action_required:ambiguous_next_control",
+    }
+    db_session.refresh(app)
+    db_session.refresh(opp)
+    assert app.status == ApplicationStatus.FAILED.value
+    assert app.submission_claimed_at is None
+    assert app.claimed_by is None
+    assert app.manual_review_reason == "ambiguous_next_control"
+    assert app.confirmation_ref is None
+    assert app.approved_at == approved_at
+    assert app.approved_by == approved_by
+    assert app.notes == original_notes
+    assert opp.status == OpportunityStatus.MANUAL_APPLICATION_REQUIRED.value
+
+    assert WorkerRunner().poll_and_submit_queue(db_session) == []
+
+
+def test_stale_claim_cannot_overwrite_current_claim_manual_handoff(db_session: Session):
+    """M2C CAS rejects a worker whose observed claim no longer owns the row."""
+    from sqlalchemy import update
+    from core.services import application_service
+
+    _opp, app = _create_awaiting_app(
+        db_session, dedup_suffix="m2c_stale_claim", submission_claimed=True
+    )
+    original_claim_time = app.submission_claimed_at
+    original_claim_owner = app.claimed_by
+    db_session.execute(
+        update(Application)
+        .where(Application.id == app.id)
+        .values(claimed_by="newer_worker")
+        .execution_options(synchronize_session=False)
+    )
+    assert application_service.handoff_claimed_application_to_manual_review(
+        db_session,
+        app.id,
+        reason="ambiguous_next_control",
+        expected_claimed_by=original_claim_owner,
+        expected_submission_claimed_at=original_claim_time,
+    ) is False
+    db_session.refresh(app)
+    assert app.submission_claimed_at == original_claim_time
+    assert app.claimed_by == "newer_worker"
+    assert app.status == ApplicationStatus.FORM_FILLED.value

@@ -370,6 +370,7 @@ export interface PendingQueueItem {
   approval_revoked_by?: string | null;
   approval_revocation_reason?: string | null;
   confirmation_ref?: string | null;
+  manual_review_reason?: string | null;
 }
 
 export interface RevokeApprovalResponse {

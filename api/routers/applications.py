@@ -18,6 +18,7 @@ from core.schemas.opportunity import (
     ApplicationUpdate,
 )
 from core.services import application_service, opportunity_service
+from core.services.application_service import MANUAL_FINAL_ACTION_REASONS
 from core.status import (
     InvalidApplicationTransitionError,
     SubmissionApprovalRequiredError,
@@ -54,6 +55,8 @@ class PendingQueueItem(BaseModel):
     approval_revocation_reason: str | None = None
     # Confirmation ref — non-null when submitted
     confirmation_ref: str | None = None
+    # M2C bounded manual-handoff code only; never browser/session diagnostics.
+    manual_review_reason: str | None = None
 
 
 class RevokeApprovalRequest(BaseModel):
@@ -267,6 +270,12 @@ def get_pending_queue(
                 approval_revoked_by=app.approval_revoked_by,
                 approval_revocation_reason=app.approval_revocation_reason,
                 confirmation_ref=confirmation_ref,
+                manual_review_reason=(
+                    app.manual_review_reason
+                    if state == "MANUAL_REVIEW"
+                    and app.manual_review_reason in MANUAL_FINAL_ACTION_REASONS
+                    else None
+                ),
             )
         )
     return items
@@ -391,4 +400,3 @@ def revoke_application_approval(
         if "claimed" in msg:
             raise HTTPException(status_code=409, detail=msg)
         raise HTTPException(status_code=400, detail=msg)
-

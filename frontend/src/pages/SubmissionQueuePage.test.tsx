@@ -45,6 +45,7 @@ const mockQueueItems: PendingQueueItem[] = [
     application_status: 'failed',
     queue_state: 'MANUAL_REVIEW',
     approved_at: '2026-09-14T01:10:00Z',
+    manual_review_reason: 'ambiguous_next_control',
   },
   {
     application_id: 104,
@@ -103,6 +104,7 @@ describe('SubmissionQueuePage', () => {
     // 3. MANUAL_REVIEW
     expect(screen.getByText('Manual Review Required')).toBeInTheDocument();
     expect(screen.getByText(/Gamma Cloud/)).toBeInTheDocument();
+    expect(screen.getByText('Final action needs manual review')).toBeInTheDocument();
 
     // 4. REVOKED
     expect(screen.getByText('Revoked')).toBeInTheDocument();
