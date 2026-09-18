@@ -89,7 +89,7 @@ FIXTURE_ANGULAR_HTML = """
     </div>
 
     <div>
-      <un-checkbox id="acceptance" name="acceptance">
+      <un-checkbox id="acceptance" name="acceptance" onclick="this.setAttribute('data-consent-clicked', 'true')">
         <label>I accept terms and conditions*</label>
       </un-checkbox>
     </div>
@@ -277,13 +277,17 @@ def test_fill_succeeds_and_stops_before_submit_when_demographics_present(playwri
         "differently_abled": "No",
         "user_type": "College Students",
         "course_pursuing": "Engineering",
-        "agree_terms": True,
+        # U9: consent is application-scoped and is supplied explicitly below —
+        # never as a profile attribute and never defaulted.
     }
     custom_answers = [
         {
             "question_id": "statement_of_purpose",
             "answer": "Looking forward to solving impactful engineering challenges.",
-        }
+        },
+        # Explicit, per-application consent is the only thing that resolves the
+        # terms acceptance checkbox.
+        {"question_id": "acceptance", "answer": "yes"},
     ]
 
     result = adapter.fill(app_ctx, candidate_data, custom_answers=custom_answers)
@@ -296,6 +300,11 @@ def test_fill_succeeds_and_stops_before_submit_when_demographics_present(playwri
     assert page.locator("input#player_name_last").input_value() == "Morgan"
     assert page.locator("input#player_email").input_value() == "alex@example.com"
     assert page.locator("input#tel").input_value() == "9876543210"
+
+    # Verify explicit consent was recorded on the acceptance checkbox
+    acceptance_box = page.locator("un-checkbox#acceptance")
+    assert acceptance_box.count() > 0
+    assert acceptance_box.get_attribute("data-consent-clicked") == "true"
 
     # Verify SOP has AI draft tag
     sop_val = page.locator("textarea[name='statement_of_purpose']").input_value()
@@ -429,3 +438,98 @@ def test_guarantee_final_submit_control_is_never_invoked(playwright_instance):
 
     browser.close()
 
+
+def test_dynamic_candidate_data_resolution():
+    """Verify that candidate data (course, duration, graduation) is resolved dynamically."""
+    adapter = UnstopAdapter()
+
+    # Create mock FormFields for course_pursuing and course_duration
+    course_field = FormField(
+        id="course", name="course_pursuing", tag="input", type="text", label="Course Pursuing*", required=True, field_role="course_pursuing"
+    )
+    duration_field = FormField(
+        id="duration", name="course_duration", tag="input", type="text", label="Course Duration*", required=True, field_role="course_duration"
+    )
+    grad_year_field = FormField(
+        id="grad", name="graduation_year", tag="input", type="text", label="Graduation Year*", required=True, field_role="graduation_year"
+    )
+
+    # 1. Non-Engineering dynamic data
+    candidate_arts = {
+        "full_name": "Alex",
+        "education": [{
+            "domain": "Arts",
+            "branch": "Fine Arts",
+            "duration": "3 Years",
+            "graduation_year": 2030
+        }]
+    }
+
+    cls1, val1 = adapter.classify_field(course_field, candidate_arts)
+    assert cls1 == QuestionClassification.PROFILE_FACT
+    assert val1 == "Arts"
+
+    cls2, val2 = adapter.classify_field(duration_field, candidate_arts)
+    assert cls2 == QuestionClassification.PROFILE_FACT
+    assert val2 == "3 Years"
+
+    cls3, val3 = adapter.classify_field(grad_year_field, candidate_arts)
+    assert cls3 == QuestionClassification.PROFILE_FACT
+    assert val3 == "2030"
+
+    # 2. Missing data should fail closed (requires user)
+    candidate_missing = {
+        "full_name": "Alex",
+        "education": [{
+            "domain": "",
+            "branch": "",
+            "duration": "",
+            "graduation_year": None
+        }]
+    }
+
+    cls_m1, val_m1 = adapter.classify_field(duration_field, candidate_missing)
+    assert cls_m1 == QuestionClassification.REQUIRES_USER
+    assert val_m1 is None
+
+    cls_m2, val_m2 = adapter.classify_field(grad_year_field, candidate_missing)
+    assert cls_m2 == QuestionClassification.REQUIRES_USER
+    assert val_m2 is None
+
+
+def test_dynamic_candidate_skills_resolution():
+    """Verify that opportunity skills do not become candidate skills without evidence."""
+    adapter = UnstopAdapter()
+
+    # Form asks for specific skills via options
+    skill_field = FormField(
+        id="skills", name="skills", tag="un-checkbox", type="checkbox", label="Skills*", required=True, field_role="skills", options=["Java", "Python", "React"]
+    )
+
+    # 1. Candidate has Java and Python
+    candidate_match = {
+        "full_name": "Alex",
+        "skills": [{"skill_name": "Java"}, {"skill_name": "Python"}, {"skill_name": "C++"}]
+    }
+
+    cls1, val1 = adapter.classify_field(skill_field, candidate_match)
+    assert cls1 == QuestionClassification.PROFILE_FACT
+    assert set(val1) == {"Java", "Python"}
+
+    # 2. Candidate has NO matching skills
+    candidate_no_match = {
+        "full_name": "Alex",
+        "skills": [{"skill_name": "C++"}, {"skill_name": "Ruby"}]
+    }
+
+    cls2, val2 = adapter.classify_field(skill_field, candidate_no_match)
+    assert cls2 == QuestionClassification.REQUIRES_USER
+    assert val2 is None
+
+    # 3. Optional field with no match should resolve to safe inference
+    optional_skill_field = FormField(
+        id="skills", name="skills", tag="un-checkbox", type="checkbox", label="Skills", required=False, field_role="skills", options=["Java", "Python", "React"]
+    )
+    cls3, val3 = adapter.classify_field(optional_skill_field, candidate_no_match)
+    assert cls3 == QuestionClassification.PROFILE_FACT
+    assert val3 is None

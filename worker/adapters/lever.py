@@ -139,6 +139,7 @@ class LeverAdapter(BasePlatformAdapter):
         candidate_data: dict[str, Any],
         resume_path: str | None = None,
         custom_answers: list[dict[str, Any]] | None = None,
+        manual_resolutions: dict[str, str] | None = None,
     ) -> FillResult:
         """Assemble structured profile data and AI-drafted answers into Lever draft payload."""
         extracted = app_ctx.extracted or self.extract({"url": app_ctx.listing_url})

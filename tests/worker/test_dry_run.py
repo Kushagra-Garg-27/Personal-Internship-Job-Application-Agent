@@ -132,7 +132,7 @@ class MockSuccessAdapter(UnstopAdapter):
             browser_page=fake_page,
         )
 
-    def fill(self, app_ctx, candidate_data, resume_path=None, custom_answers=None):
+    def fill(self, app_ctx, candidate_data, resume_path=None, custom_answers=None, manual_resolutions=None):
         return FillResult(
             success=True,
             status="ready_for_review",

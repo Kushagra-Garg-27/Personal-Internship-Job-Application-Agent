@@ -257,6 +257,16 @@ class Application(TimestampMixin, Base):
     # ── Relationships ─────────────────────────────────────────────────
     opportunity: Mapped[Opportunity] = relationship(back_populates="applications")
     resume: Mapped["Resume"] = relationship(lazy="selectin")  # noqa: F821
+    manual_resolutions: Mapped[list[ManualResolutionRequest]] = relationship(
+        back_populates="application",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        # U11.1: deterministic iteration order for the audit/history reads.
+        # Active-resolution *selection* is additionally enforced by an explicit
+        # ordered query in manual_resolution_service.get_active_resolutions, so
+        # correctness never relies on this ordering alone.
+        order_by="ManualResolutionRequest.id",
+    )
 
     # ── ORM-level validation ──────────────────────────────────────────
     @validates("status")
@@ -272,4 +282,61 @@ class Application(TimestampMixin, Base):
         return (
             f"<Application id={self.id} opp={self.opportunity_id} "
             f"attempt={self.attempt_number} status={self.status!r}>"
+        )
+
+
+class ManualResolutionRequest(TimestampMixin, Base):
+    """An application-scoped request for a human to resolve a field value.
+
+    Created when the automated worker encounters an ambiguity (e.g., taxonomy
+    mismatch for a required dropdown) that it cannot safely resolve.
+    """
+
+    __tablename__ = "manual_resolution_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    application_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("applications.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    opportunity_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("opportunities.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # ── Field Identification ─────────────────────────────────────────
+    field_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    field_label: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    field_role: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    # ── Context ───────────────────────────────────────────────────────
+    candidate_value: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    available_options: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    # ── Resolution State ──────────────────────────────────────────────
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending")  # pending, resolved, invalidated
+    resolved_value: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    # ── Relationships ─────────────────────────────────────────────────
+    application: Mapped[Application] = relationship(back_populates="manual_resolutions")
+
+    @validates("status")
+    def _validate_status(self, _key: str, value: str) -> str:
+        if value not in {"pending", "resolved", "invalidated"}:
+            raise ValueError(f"Invalid status {value!r}. Must be one of: pending, resolved, invalidated")
+        return value
+
+    def __repr__(self) -> str:
+        return (
+            f"<ManualResolutionRequest id={self.id} app={self.application_id} "
+            f"field={self.field_name!r} status={self.status!r}>"
         )

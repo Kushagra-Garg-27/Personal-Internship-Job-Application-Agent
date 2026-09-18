@@ -1009,8 +1009,10 @@ class TestFailClosedHardening:
         from unittest.mock import patch
         real_resolve = resolve_final_submission_control
 
-        def _resolve_and_move(p):
-            res = real_resolve(p)
+        def _resolve_and_move(p, **kwargs):
+            # kwargs carries the adapter's explicit terminal-step context (U9);
+            # the resolver's real signature already accepts it, this stub must too.
+            res = real_resolve(p, **kwargs)
             # Simulate element moved to another form after resolution
             p.evaluate("""() => {
                 const formC = document.createElement('form');

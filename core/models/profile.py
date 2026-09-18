@@ -87,6 +87,17 @@ class ProfileEducation(Base):
     institution: Mapped[str] = mapped_column(String(200), nullable=False)
     graduation_year: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # U9: explicit candidate-provided course duration (e.g. "4 Years").
+    # Nullable with NO default and NEVER inferred from degree, graduation year,
+    # institution, or the options offered by a form.  Absence stays absence and
+    # the Unstop adapter classifies it as REQUIRES_USER.
+    duration: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    # U10: explicit candidate-provided education domain (e.g. "Engineering").
+    # Nullable with NO default and NEVER inferred from degree, branch, or dropdown
+    # options. Absence stays absence and the Unstop adapter classifies it as REQUIRES_USER.
+    domain: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     profile: Mapped[Profile] = relationship(back_populates="education")
 
     def __repr__(self) -> str:

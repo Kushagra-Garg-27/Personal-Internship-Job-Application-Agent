@@ -33,6 +33,7 @@ from worker.adapters.base import (
 )
 from worker.adapters.submission_controls import (
     SubmissionControlResolutionStatus,
+    TerminalStepContext,
     redact_url,
     revalidate_handle_before_click,
     resolve_final_submission_control,
@@ -209,6 +210,19 @@ class QuestionClassification(str, Enum):
     SAFE_INFERENCE = "SAFE_INFERENCE"
     REQUIRES_USER = "REQUIRES_USER"
     UNSUPPORTED = "UNSUPPORTED"
+    # U9: platform/application consent (terms acceptance).  Consent is
+    # application-scoped and can only be resolved by an explicit answer tied to
+    # that application.  It is never a static profile fact, never implied by the
+    # existence of a checkbox, and never defaulted to True.
+    CONSENT = "CONSENT"
+
+
+# Explicit affirmative answers that resolve a consent question.  Anything else
+# (including absence) leaves the consent unresolved.
+_EXPLICIT_CONSENT_ANSWERS = {
+    "true", "yes", "i accept", "accepted", "accept", "agree",
+    "i agree", "consent", "i consent", "on",
+}
 
 
 @dataclass
@@ -670,6 +684,178 @@ class UnstopAdapter(BasePlatformAdapter):
         ".submit-btn",
     ]
 
+    @staticmethod
+    def _match_option_by_text(options_locator: Any, expected: str) -> Any:
+        """Return the first visible option whose text matches ``expected`` exactly.
+
+        U9 dropdown safety: never selects an arbitrary option.  Returns None when
+        no option matches the candidate value, leaving the field unresolved.
+        """
+        if options_locator is None or not callable(getattr(options_locator, "count", None)):
+            return None
+        try:
+            count = options_locator.count()
+        except Exception:
+            return None
+        if not isinstance(count, int) or count == 0:
+            return None
+        expected_norm = str(expected).strip().lower()
+        for i in range(count):
+            try:
+                opt = options_locator.nth(i)
+                text = (opt.text_content() or "").strip().lower()
+            except Exception:
+                continue
+            if text == expected_norm:
+                try:
+                    if opt.is_visible():
+                        return opt
+                except Exception:
+                    continue
+        return None
+
+    @staticmethod
+    def _detect_field_role(
+        name: str | None,
+        el_id: str | None,
+        label: str,
+        placeholder: str = "",
+        aria_label: str = "",
+        el_type: str = "",
+        tag: str = "",
+    ) -> str:
+        """Detect the semantic role of an extracted form field.
+
+        Enforces a deterministic two-tier resolution strategy:
+        1. Tier 1 (Explicit Control Identifiers): Developer-assigned names, IDs,
+           and formcontrolnames in the DOM carry highest precedence.
+        2. Tier 2 (Semantic Label & Text Context): Evaluated only when no explicit
+           control identifier resolves the field. Strictly distinguishes domain
+           ('course_pursuing') from degree/course ('course_stream'), duration,
+           and specialization.
+        """
+        norm_name = (name or "").lower().strip()
+        norm_id = (el_id or "").lower().strip()
+        norm_lbl = (label or "").lower().strip()
+        norm_placeholder = (placeholder or "").lower().strip()
+        norm_aria = (aria_label or "").lower().strip()
+
+        # =====================================================================
+        # TIER 1: Explicit Control Identifiers (Highest Precedence)
+        # =====================================================================
+        # Contact and Identity Identifiers
+        if "firstname" in norm_name or "first_name" in norm_name or "first_name" in norm_id:
+            return "first_name"
+        if "lastname" in norm_name or "name_last" in norm_name or "last_name" in norm_name or "last_name" in norm_id:
+            return "last_name"
+        if "full_name" in norm_name or "full_name" in norm_id or (
+            "name" in norm_name and not any(x in norm_name for x in ("org", "user", "last", "first", "course", "degree", "stream", "file"))
+        ):
+            return "full_name"
+        if "email" in norm_name or "email" in norm_id or el_type == "email":
+            return "email"
+        if any(x in norm_name or x in norm_id for x in ("tel", "mobile", "phone")) or el_type == "tel":
+            return "phone"
+        if "gender" in norm_name or "gender" in norm_id:
+            return "gender"
+        if any(x in norm_name or x in norm_id for x in ("differently_abled", "disability", "handicap")):
+            return "differently_abled"
+        if "user_type" in norm_name or ("type" in norm_name and tag == "un-radio-group"):
+            return "user_type"
+        if "cities_input" in norm_id or "player_location" in norm_name or "location" in norm_name:
+            return "location"
+        if "skills" in norm_id or "skills" in norm_name:
+            return "skills"
+        if any(x in norm_name or x in norm_id for x in ("organization", "organisation", "institute", "college")):
+            return "organization"
+        if "designation" in norm_name or "designation" in norm_id:
+            return "designation"
+        if "work_experience" in norm_name or "experience" in norm_name:
+            return "work_experience"
+        if any(x in norm_name or x in norm_id for x in ("acceptance", "agree_terms")):
+            return "acceptance"
+        if el_type == "file" or any(x in norm_name for x in ("resume", "cv")):
+            return "resume"
+        if any(x in norm_name for x in ("statement", "sop", "why_apply")):
+            return "statement_of_purpose"
+
+        # Education Control Identifiers (Unambiguous DOM Tokens)
+        if "course_duration" in norm_name or "course_duration" in norm_id or norm_name == "duration" or norm_id == "duration":
+            return "course_duration"
+        if "course_specialization" in norm_name or "course_specialization" in norm_id or any(x in norm_name or x in norm_id for x in ("specialization", "branch")):
+            return "course_specialization"
+        if "course_stream" in norm_name or "course_stream" in norm_id or any(x in norm_name or x in norm_id for x in ("stream", "degree", "course_name")):
+            return "course_stream"
+        if "course_pursuing" in norm_name or "course_pursuing" in norm_id or any(x in norm_name or x in norm_id for x in ("domain", "education_domain")):
+            return "course_pursuing"
+        if any(x in norm_name or x in norm_id for x in ("passout_year", "graduation_year", "passing_year", "batch")):
+            return "graduation_year"
+        if any(x in norm_name or x in norm_id for x in ("programme", "program")):
+            return "programme"
+
+        # =====================================================================
+        # TIER 2: Semantic Label & Text Context (Fallback when no identifier matched)
+        # =====================================================================
+        # Education Fields by Semantic Label
+        if "duration" in norm_lbl:
+            return "course_duration"
+
+        if any(x in norm_lbl for x in ("specialization", "branch", "major")):
+            return "course_specialization"
+
+        # Domain: represents high-level domain/discipline (Engineering, Management, etc.)
+        # Never match bare "course" here — "Course*" on Unstop denotes degree/stream.
+        if any(x in norm_lbl for x in ("domain", "course pursuing", "pursuing course", "discipline")):
+            return "course_pursuing"
+
+        # Degree / Stream: represents degree (B.Tech, MBA, etc.)
+        # Matches "stream", "degree", or "course" when not duration/specialization/pursuing.
+        if any(x in norm_lbl for x in ("stream", "degree")) or (
+            "course" in norm_lbl
+            and not any(x in norm_lbl for x in ("duration", "specialization", "pursuing", "domain", "discipline"))
+        ):
+            return "course_stream"
+
+        if any(x in norm_lbl for x in ("passout", "graduation year", "passing year", "year of graduation", "batch")):
+            return "graduation_year"
+
+        if "programme" in norm_lbl or "program" in norm_lbl:
+            return "programme"
+
+        # Other fields by Semantic Label
+        if "first name" in norm_lbl:
+            return "first_name"
+        if "last name" in norm_lbl:
+            return "last_name"
+        if "email" in norm_lbl:
+            return "email"
+        if "mobile" in norm_lbl or "phone" in norm_lbl:
+            return "phone"
+        if "location" in norm_lbl or "city" in norm_lbl:
+            return "location"
+        if "skill" in norm_lbl or "skill" in norm_placeholder or "skills" in norm_id:
+            return "skills"
+        if any(x in norm_lbl for x in ("institute", "college", "organisation", "organization")):
+            return "organization"
+        if "gender" in norm_lbl:
+            return "gender"
+        if "differently abled" in norm_lbl or "disability" in norm_lbl:
+            return "differently_abled"
+        if "user type" in norm_lbl:
+            return "user_type"
+        if "designation" in norm_lbl:
+            return "designation"
+        if "experience" in norm_lbl:
+            return "work_experience"
+        if "terms" in norm_lbl or "agree" in norm_lbl:
+            return "acceptance"
+        if "resume" in norm_lbl or "cv" in norm_lbl:
+            return "resume"
+        if any(x in norm_lbl for x in ("statement", "why", "sop")):
+            return "statement_of_purpose"
+
+        return "custom"
+
     def extract_form_fields(self, page: Any) -> list[FormField]:
         """Extract interactive form fields from the current Unstop page/modal."""
         fields: list[FormField] = []
@@ -687,7 +873,11 @@ class UnstopAdapter(BasePlatformAdapter):
                     if not el.is_visible():
                         continue
                     tag = el.evaluate("e => e.tagName").lower()
-                    name = el.get_attribute("name")
+                    name = (
+                        el.get_attribute("name")
+                        or el.get_attribute("formcontrolname")
+                        or el.get_attribute("ng-reflect-name")
+                    )
                     el_id = el.get_attribute("id") or el.get_attribute("data-test") or ""
                     placeholder = el.get_attribute("placeholder") or ""
                     aria_label = el.get_attribute("aria-label") or ""
@@ -750,52 +940,16 @@ class UnstopAdapter(BasePlatformAdapter):
                     elif tag == "un-checkbox" and ("acceptance" in (name or "") or "acceptance" in el_id):
                         is_req = True
 
-                    # Detect semantic field role
-                    norm_name = (name or "").lower()
-                    norm_id = el_id.lower()
-                    norm_lbl = label.lower()
-
-                    field_role = "custom"
-                    if "firstname" in norm_name or "first_name" in norm_name or "first name" in norm_lbl:
-                        field_role = "first_name"
-                    elif "lastname" in norm_name or "name_last" in norm_name or "last_name" in norm_name or "last name" in norm_lbl:
-                        field_role = "last_name"
-                    elif "full_name" in norm_name or ("name" in norm_name and "org" not in norm_name and "user" not in norm_name and "last" not in norm_name and "first" not in norm_name):
-                        field_role = "full_name"
-                    elif "email" in norm_name or el_type == "email" or "email" in norm_lbl:
-                        field_role = "email"
-                    elif "tel" in norm_name or "mobile" in norm_name or "phone" in norm_name or el_type == "tel" or "mobile" in norm_lbl or "phone" in norm_lbl:
-                        field_role = "phone"
-                    elif "cities_input" in norm_id or "player_location" in norm_name or "location" in norm_lbl:
-                        field_role = "location"
-                    elif "skill" in norm_lbl or "skill" in placeholder.lower() or "skills" in norm_id:
-                        field_role = "skills"
-                    elif "institute" in norm_lbl or "college" in norm_lbl or "organisation" in norm_lbl or "organization" in norm_lbl or "organisation" in norm_id or "organisation" in norm_name:
-                        field_role = "organization"
-                    elif "gender" in norm_name or "gender" in norm_lbl:
-                        field_role = "gender"
-                    elif "differently_abled" in norm_name or "differently abled" in norm_lbl or "disability" in norm_lbl:
-                        field_role = "differently_abled"
-                    elif "user_type" in norm_name or ("type" in norm_name and tag == "un-radio-group") or "user type" in norm_lbl:
-                        field_role = "user_type"
-                    elif "course_pursuing" in norm_name or "course" in norm_lbl:
-                        field_role = "course_pursuing"
-                    elif "course_stream" in norm_name or "stream" in norm_lbl:
-                        field_role = "course_stream"
-                    elif "course_specialization" in norm_name or "specialization" in norm_lbl:
-                        field_role = "course_specialization"
-                    elif "passout_year" in norm_name or "passout" in norm_lbl or "graduation_year" in norm_name or "graduation year" in norm_lbl:
-                        field_role = "graduation_year"
-                    elif "designation" in norm_name or "designation" in norm_lbl:
-                        field_role = "designation"
-                    elif "work_experience" in norm_name or "experience" in norm_lbl:
-                        field_role = "work_experience"
-                    elif "acceptance" in norm_name or "acceptance" in norm_id or "terms" in norm_lbl or "agree" in norm_lbl:
-                        field_role = "acceptance"
-                    elif el_type == "file" or "resume" in norm_name or "resume" in norm_lbl or "cv" in norm_lbl:
-                        field_role = "resume"
-                    elif "statement" in norm_name or "why" in norm_lbl or "statement" in norm_lbl or "sop" in norm_lbl:
-                        field_role = "statement_of_purpose"
+                    # Detect semantic field role deterministically
+                    field_role = self._detect_field_role(
+                        name=name,
+                        el_id=el_id,
+                        label=label,
+                        placeholder=placeholder,
+                        aria_label=aria_label,
+                        el_type=el_type,
+                        tag=tag,
+                    )
 
                     fields.append(
                         FormField(
@@ -822,6 +976,7 @@ class UnstopAdapter(BasePlatformAdapter):
         field_obj: FormField,
         candidate_data: dict[str, Any],
         custom_answers: list[dict[str, Any]] | None = None,
+        manual_resolutions: dict[str, str] | None = None,
     ) -> tuple[QuestionClassification, Any]:
         """Classify field into PROFILE_FACT, SAFE_INFERENCE, REQUIRES_USER, or UNSUPPORTED."""
         role = field_obj.field_role
@@ -829,6 +984,10 @@ class UnstopAdapter(BasePlatformAdapter):
             str(a.get("question_id") or a.get("question_text") or a.get("label")): a.get("answer", "")
             for a in (custom_answers or [])
         }
+
+        # U11: Manual resolutions take highest precedence for this specific application attempt.
+        if manual_resolutions and field_obj.name in manual_resolutions:
+            return QuestionClassification.PROFILE_FACT, manual_resolutions[field_obj.name]
 
         # SENSITIVE DEMOGRAPHIC & CONSENT FIELDS:
         # Rule #5: NEVER invent demographic data (gender, disability), experience, preferences, or consent.
@@ -850,10 +1009,23 @@ class UnstopAdapter(BasePlatformAdapter):
             return QuestionClassification.REQUIRES_USER, None
 
         if role == "acceptance":
-            val = candidate_data.get("agree_terms") or answers_map.get("acceptance") or answers_map.get("agree_terms")
-            if val:
-                return QuestionClassification.PROFILE_FACT, True
-            return QuestionClassification.REQUIRES_USER, None
+            # U9: consent is application-scoped.  Only an explicit answer tied to
+            # THIS application can resolve it — never the candidate profile,
+            # never the mere existence of the checkbox, never a default.
+            explicit = (
+                answers_map.get("acceptance")
+                or answers_map.get("agree_terms")
+                or answers_map.get("consent")
+                or answers_map.get("terms")
+            )
+            if isinstance(explicit, bool):
+                return (QuestionClassification.CONSENT, True) if explicit else (QuestionClassification.CONSENT, None)
+            if isinstance(explicit, str) and explicit.strip().lower() in _EXPLICIT_CONSENT_ANSWERS:
+                return QuestionClassification.CONSENT, True
+            # Unresolved consent is returned as CONSENT with no value: the fill
+            # loop must not check the terms box, and a required consent field
+            # fails closed to human review.
+            return QuestionClassification.CONSENT, None
 
         if role == "user_type":
             val = candidate_data.get("user_type") or answers_map.get("user_type")
@@ -861,8 +1033,22 @@ class UnstopAdapter(BasePlatformAdapter):
                 return QuestionClassification.PROFILE_FACT, val
             return (QuestionClassification.REQUIRES_USER, None) if field_obj.required else (QuestionClassification.SAFE_INFERENCE, None)
 
-        if role in {"course_pursuing", "course_stream", "course_specialization", "graduation_year", "designation", "work_experience"}:
+        if role in {"course_pursuing", "course_stream", "course_specialization", "graduation_year", "course_duration", "designation", "work_experience", "programme"}:
             val = candidate_data.get(role) or answers_map.get(role)
+            if not val and candidate_data.get("education"):
+                edus = candidate_data["education"]
+                if role == "course_pursuing":
+                    val = edus[0].get("domain")
+                elif role == "course_stream":
+                    val = edus[0].get("degree") or edus[0].get("stream")
+                elif role == "course_specialization":
+                    val = edus[0].get("specialization") or edus[0].get("branch")
+                elif role == "graduation_year":
+                    val = str(edus[0].get("graduation_year")) if edus[0].get("graduation_year") else None
+                elif role == "course_duration":
+                    val = edus[0].get("duration")
+                elif role == "programme":
+                    val = edus[0].get("programme")
             if val:
                 return QuestionClassification.PROFILE_FACT, val
             return (QuestionClassification.REQUIRES_USER, None) if field_obj.required else (QuestionClassification.SAFE_INFERENCE, None)
@@ -930,6 +1116,9 @@ class UnstopAdapter(BasePlatformAdapter):
             if not val and (answers_map.get("skills") or answers_map.get("skill")):
                 raw_sk = answers_map.get("skills") or answers_map.get("skill")
                 val = raw_sk if isinstance(raw_sk, list) else [str(raw_sk)]
+            if val and field_obj.options:
+                options_lower = {opt.lower(): opt for opt in field_obj.options}
+                val = [options_lower[v.lower()] for v in val if v.lower() in options_lower]
             if val:
                 return QuestionClassification.PROFILE_FACT, val
             return (QuestionClassification.REQUIRES_USER, None) if field_obj.required else (QuestionClassification.PROFILE_FACT, None)
@@ -956,7 +1145,7 @@ class UnstopAdapter(BasePlatformAdapter):
                 return QuestionClassification.SAFE_INFERENCE, ans
 
         # Check for sensitive / personal decision questions
-        sensitive_keywords = ["salary", "ctc", "criminal", "authorization", "visa", "gender", "race", "disability", "notice period"]
+        sensitive_keywords = ["salary", "ctc", "compensation", "criminal", "authorization", "visa", "gender", "race", "disability", "notice period"]
         if any(k in field_obj.label.lower() for k in sensitive_keywords):
             return QuestionClassification.REQUIRES_USER, None
 
@@ -971,6 +1160,7 @@ class UnstopAdapter(BasePlatformAdapter):
         candidate_data: dict[str, Any],
         resume_path: str | None = None,
         custom_answers: list[dict[str, Any]] | None = None,
+        manual_resolutions: dict[str, str] | None = None,
     ) -> FillResult:
         """Fill form elements on Unstop and leave browser open at unsubmitted state.
 
@@ -1046,6 +1236,12 @@ class UnstopAdapter(BasePlatformAdapter):
                 pass
 
             # Check for Quick Apply / Register button on opportunity overview page
+            try:
+                page.wait_for_selector("#un-register-btn, button:has-text('Quick Apply'), button:has-text('Apply Now'), button:has-text('Register')", timeout=10000, state="attached")
+                page.wait_for_timeout(2000)
+            except Exception:
+                pass
+
             apply_btn = page.locator(
                 "#un-register-btn, button:has-text('Quick Apply'), div:has-text('Quick Apply'), "
                 "button:has-text('Apply Now'), button:has-text('Register')"
@@ -1053,7 +1249,8 @@ class UnstopAdapter(BasePlatformAdapter):
             if apply_btn.count() > 0 and apply_btn.first.is_visible():
                 try:
                     apply_btn.first.click()
-                    page.wait_for_timeout(2500)
+                    page.wait_for_timeout(3500)
+                    page.wait_for_selector("un-radio-group, input, mat-select", timeout=5000)
                 except Exception as exc:
                     logger.debug("Apply button click notice: %s", exc)
 
@@ -1069,172 +1266,364 @@ class UnstopAdapter(BasePlatformAdapter):
                     page.wait_for_timeout(1000)
 
             # Extract form fields from live page
+            page.wait_for_timeout(4000)
+            try:
+                page.wait_for_selector("un-radio-group, input, mat-select", timeout=15000, state="attached")
+            except Exception as e:
+                logger.warning("wait_for_selector timed out waiting for form controls: %s", e)
             extracted_fields = self.extract_form_fields(page)
 
             # Classify all extracted fields
             classified_fields: list[tuple[FormField, QuestionClassification, Any]] = []
             for f in extracted_fields:
-                classification, val = self.classify_field(f, candidate_data, custom_answers)
+                classification, val = self.classify_field(f, candidate_data, custom_answers, manual_resolutions)
                 f.classification = classification
                 classified_fields.append((f, classification, val))
+                logger.debug(
+                    "unstop field classified: name=%s role=%s required=%s class=%s",
+                    f.name, f.field_role, f.required, classification.value,
+                )
 
-                # Fail-closed safety rule: If any REQUIRED field requires user or is unsupported, STOP
-                if f.required and classification in {QuestionClassification.REQUIRES_USER, QuestionClassification.UNSUPPORTED}:
-                    return FillResult(
-                        success=False,
-                        status="manual_required",
-                        error_reason=f"Required field '{f.label or f.name}' requires user decision ({classification.value}). Cannot auto-fill.",
-                    )
+            # We do NOT early exit here anymore, it's done inside _fill_all_fields
 
-            # Deterministically fill fields
-            for f, classification, val in classified_fields:
-                if val is None:
-                    continue
+            def _fill_all_fields(fields_list: list[tuple[FormField, QuestionClassification, Any]]) -> FillResult | None:
+                """Fill classified fields.
 
-                def _field_locator(tag_name: str, suffix: str = ""):
-                    parts = []
-                    if f.id:
-                        parts.append(f"{tag_name}#{f.id}{suffix}")
-                    if f.name:
-                        parts.append(f"{tag_name}[name='{f.name}']{suffix}")
-                    sel_str = ", ".join(parts) if parts else f"{tag_name}{suffix}"
-                    return page.locator(sel_str).first
+                Returns FillResult if a field fails closed, else None (success).
+                """
+                for f, classification, val in fields_list:
+                    # U9/U11: Check for unresolved required fields here so we process fields in DOM order.
+                    if f.required and classification in {
+                        QuestionClassification.REQUIRES_USER,
+                        QuestionClassification.UNSUPPORTED,
+                        QuestionClassification.CONSENT,
+                    }:
+                        if val is None:
+                            logger.warning(
+                                "Stopping fill: required field %s is unresolved (%s).",
+                                f.name, classification.value,
+                            )
+                            return FillResult(
+                                success=False,
+                                status="manual_required",
+                                error_reason=f"Required field '{f.label or f.name}' requires user decision ({classification.value}). Cannot auto-fill.",
+                            )
 
-                if f.field_role == "first_name":
-                    loc = _field_locator("input")
-                    if loc.count() > 0 and loc.is_editable():
-                        loc.fill(str(val))
+                    if val is None:
+                        continue
 
-                elif f.field_role == "last_name":
-                    loc = _field_locator("input")
-                    if loc.count() > 0 and loc.is_editable():
-                        loc.fill(str(val))
+                    def _field_locator(tag_name: str, suffix: str = ""):
+                        parts = []
+                        if f.id:
+                            parts.append(f"{tag_name}#{f.id}{suffix}")
+                        if f.name:
+                            parts.append(f"{tag_name}[name='{f.name}']{suffix}")
+                        sel_str = ", ".join(parts) if parts else f"{tag_name}{suffix}"
+                        return page.locator(sel_str).first
 
-                elif f.field_role == "full_name":
-                    loc = _field_locator("input")
-                    if loc.count() > 0 and loc.is_editable():
-                        loc.fill(str(val))
+                    if f.field_role == "first_name":
+                        loc = _field_locator("input")
+                        if loc.count() > 0 and loc.is_editable():
+                            loc.fill(str(val))
 
-                elif f.field_role == "email":
-                    loc = _field_locator("input")
-                    if loc.count() > 0 and loc.is_editable():
-                        loc.fill(str(val))
+                    elif f.field_role == "last_name":
+                        loc = _field_locator("input")
+                        if loc.count() > 0 and loc.is_editable():
+                            loc.fill(str(val))
 
-                elif f.field_role == "phone":
-                    loc = _field_locator("input")
-                    if loc.count() > 0 and loc.is_editable():
-                        loc.fill(str(val))
+                    elif f.field_role == "full_name":
+                        loc = _field_locator("input")
+                        if loc.count() > 0 and loc.is_editable():
+                            loc.fill(str(val))
 
-                elif f.field_role == "location":
-                    loc = _field_locator("input")
-                    if loc.count() > 0:
-                        geo_btn = page.locator("un-icon.geo_location").first
-                        if geo_btn.count() > 0 and geo_btn.is_visible():
-                            geo_btn.click()
+                    elif f.field_role == "email":
+                        loc = _field_locator("input")
+                        if loc.count() > 0 and loc.is_editable():
+                            loc.fill(str(val))
+
+                    elif f.field_role == "phone":
+                        loc = _field_locator("input")
+                        if loc.count() > 0 and loc.is_editable():
+                            loc.fill(str(val))
+
+                    elif f.field_role == "location":
+                        loc = _field_locator("input")
+                        if loc.count() > 0:
+                            geo_btn = page.locator("un-icon.geo_location").first
+                            if geo_btn.count() > 0 and geo_btn.is_visible():
+                                geo_btn.click()
+                                page.wait_for_timeout(1000)
+
+                            if not loc.input_value():
+                                page.evaluate("""(locationVal) => {
+                                    const el = document.getElementById('cities_input') || document.querySelector('input[name="player_location"]');
+                                    if (el) {
+                                        el.removeAttribute('readonly');
+                                        el.value = locationVal;
+                                        el.dispatchEvent(new Event('input', {bubbles: true}));
+                                        el.dispatchEvent(new Event('change', {bubbles: true}));
+                                    }
+                                }""", str(val))
+                                page.wait_for_timeout(300)
+
+                    elif f.field_role == "organization":
+                        org_input = page.locator("input[id*='organisation'], app-autocomplete input").first
+                        if org_input.count() > 0 and org_input.is_visible():
+                            org_input.click()
+                            org_input.type(str(val), delay=30)
                             page.wait_for_timeout(1000)
-
-                        if not loc.input_value():
-                            page.evaluate("""(locationVal) => {
-                                const el = document.getElementById('cities_input') || document.querySelector('input[name="player_location"]');
-                                if (el) {
-                                    el.removeAttribute('readonly');
-                                    el.value = locationVal;
-                                    el.dispatchEvent(new Event('input', {bubbles: true}));
-                                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                                }
-                            }""", str(val))
-                            page.wait_for_timeout(300)
-
-                elif f.field_role == "organization":
-                    org_input = page.locator("input[id*='organisation'], app-autocomplete input").first
-                    if org_input.count() > 0 and org_input.is_visible():
-                        org_input.click()
-                        org_input.type(str(val), delay=30)
-                        page.wait_for_timeout(1000)
-                        org_opt = page.locator(".autocomplete-content li, div[class*='option']").first
-                        if org_opt.count() > 0 and org_opt.is_visible():
-                            org_opt.click()
-                            page.wait_for_timeout(300)
-                        else:
-                            org_input.press("Enter")
-
-                elif f.field_role == "skills":
-                    skills_input = page.locator("input[placeholder*='skills'], input[id*='skills'], app-autocomplete input").last
-                    if skills_input.count() > 0 and skills_input.is_visible():
-                        skill_list = val if isinstance(val, list) else [str(val)]
-                        for sk in skill_list:
-                            skills_input.click()
-                            skills_input.type(str(sk), delay=30)
-                            page.wait_for_timeout(1000)
-                            s_opt = page.locator(".autocomplete-content li").first
-                            if s_opt.count() > 0 and s_opt.is_visible():
-                                s_opt.click()
+                            # U9: only an autocomplete suggestion that matches the
+                            # typed candidate value may be selected.  An arbitrary
+                            # first suggestion is never clicked.
+                            org_opt = self._match_option_by_text(
+                                page.locator(".autocomplete-content li, div[class*='option']"),
+                                str(val),
+                            )
+                            if org_opt is not None:
+                                org_opt.click()
                                 page.wait_for_timeout(300)
                             else:
-                                skills_input.press("Enter")
+                                page.keyboard.press("Escape")
+                                page.wait_for_timeout(300)
+                                logger.warning(
+                                    "No autocomplete suggestion matches the candidate "
+                                    "value for %s; leaving unresolved.", f.name,
+                                )
+                                if f.required:
+                                    return FillResult(
+                                        success=False,
+                                        status="manual_required",
+                                        error_reason=(
+                                            f"Field '{f.label or f.name}' has no matching "
+                                            "autocomplete option for the candidate value. "
+                                            "Cannot auto-fill."
+                                        ),
+                                    )
 
-                elif f.tag == "un-radio-group":
-                    rg_parts = []
-                    if f.id:
-                        rg_parts.append(f"un-radio-group#{f.id} label")
-                    if f.name:
-                        rg_parts.append(f"un-radio-group[name='{f.name}'] label")
-                    rg_sel = ", ".join(rg_parts) if rg_parts else "un-radio-group label"
-                    rg_lbl = page.locator(rg_sel).filter(has_text=str(val)).first
-                    if rg_lbl.count() > 0 and rg_lbl.is_visible():
-                        rg_lbl.click()
+                    elif f.field_role == "skills":
+                        skills_input = page.locator("input[placeholder*='skills'], input[id*='skills'], app-autocomplete input").last
+                        if skills_input.count() > 0 and skills_input.is_visible():
+                            skill_list = val if isinstance(val, list) else [str(val)]
+                            for sk in skill_list:
+                                skills_input.click()
+                                skills_input.type(str(sk), delay=30)
+                                page.wait_for_timeout(1000)
+                                # U9: select only a suggestion matching the typed
+                                # candidate skill; never the first option.
+                                s_opt = self._match_option_by_text(
+                                    page.locator(".autocomplete-content li"),
+                                    str(sk),
+                                )
+                                if s_opt is not None:
+                                    s_opt.click()
+                                    page.wait_for_timeout(300)
+                                else:
+                                    page.keyboard.press("Escape")
+                                    page.wait_for_timeout(300)
+                                    logger.warning(
+                                        "No autocomplete suggestion matches the candidate "
+                                        "skill value for %s; leaving unresolved.", f.name,
+                                    )
+                                    if f.required:
+                                        return FillResult(
+                                            success=False,
+                                            status="manual_required",
+                                            error_reason=(
+                                                f"Field '{f.label or f.name}' has no matching "
+                                                "autocomplete option for the candidate value. "
+                                                "Cannot auto-fill."
+                                            ),
+                                        )
 
-                elif f.tag == "mat-select":
-                    sel = _field_locator("mat-select")
-                    if sel.count() > 0 and sel.is_visible():
-                        sel.click()
-                        page.wait_for_timeout(500)
-                        opt = page.locator("mat-option, .mat-mdc-option").filter(has_text=str(val)).first
-                        if opt.count() == 0 or not opt.is_visible():
-                            opt = page.locator("mat-option, .mat-mdc-option").first
-                        if opt.count() > 0 and opt.is_visible():
-                            opt.click()
-                            page.wait_for_timeout(300)
-
-                elif f.tag == "un-checkbox":
-                    if bool(val):
-                        chk_parts = []
+                    elif f.tag == "un-radio-group":
+                        rg_parts = []
                         if f.id:
-                            chk_parts.append(f"un-checkbox#{f.id} label")
+                            rg_parts.append(f"un-radio-group[id='{f.id}' i] label")
                         if f.name:
-                            chk_parts.append(f"un-checkbox[name='{f.name}'] label")
-                        chk_sel = ", ".join(chk_parts) if chk_parts else "un-checkbox label"
-                        chk = page.locator(chk_sel).first
-                        if chk.count() > 0 and chk.is_visible():
-                            chk.click()
+                            rg_parts.append(f"un-radio-group[name='{f.name}' i] label")
+                            rg_parts.append(f"un-radio-group[formcontrolname='{f.name}' i] label")
+                            rg_parts.append(f"un-radio-group[ng-reflect-name='{f.name}' i] label")
+                        rg_sel = ", ".join(rg_parts) if rg_parts else "un-radio-group label"
+                        rg_lbl = page.locator(rg_sel).filter(has_text=str(val)).first
+                        if rg_lbl.count() == 0 and f.name:
+                            rg_lbl = page.locator(f"un-radio-group[name='{f.name}' i] label:has-text('{val}')").first
+                        if rg_lbl.count() == 0 and f.name:
+                            # Fallback: match a label inside the group by exact
+                            # normalized text. A label that merely contains the
+                            # candidate value is not an evidence match.
+                            labels = page.locator(f"un-radio-group[name='{f.name}' i] un-radio label, un-radio-group[formcontrolname='{f.name}' i] un-radio label, un-radio-group[ng-reflect-name='{f.name}' i] un-radio label").all()
+                            for lbl in labels:
+                                text = (lbl.text_content() or "").strip().lower()
+                                if text == str(val).strip().lower():
+                                    rg_lbl = lbl
+                                    break
 
-                elif f.field_role == "statement_of_purpose":
-                    formatted_text = str(val)
-                    if "[AI DRAFT" not in formatted_text:
-                        formatted_text = f"[AI DRAFT - PENDING APPROVAL]\n\n{formatted_text}"
-                    textarea = page.locator("textarea[name*='statement'], textarea[placeholder*='Why'], textarea").first
-                    if textarea.count() > 0 and textarea.is_editable():
-                        textarea.fill(formatted_text)
-                    processed_answers.append({
-                        "question_id": f.id or "statement_of_purpose",
-                        "label": f.label or "Why do you want to apply for this opportunity?",
-                        "answer": formatted_text,
-                        "is_ai_draft": True,
-                    })
+                        if rg_lbl.count() > 0 and rg_lbl.is_visible():
+                            rg_lbl.click(force=True)
+                            logger.debug("Selected radio option for %s", f.name)
+                        else:
+                            # U9 RADIO SAFETY: no option matches the candidate
+                            # value exactly, so nothing is selected on the
+                            # candidate's behalf.  An arbitrary option is never
+                            # chosen; a required field fails closed.
+                            logger.warning(
+                                "No radio option matches the candidate value for %s; "
+                                "left unresolved instead of selecting an arbitrary option.",
+                                f.name,
+                            )
+                            if f.required:
+                                available_options = []
+                                # Try to get all labels in the radio group
+                                for lbl in page.locator(f"un-radio-group[name='{f.name}' i] un-radio label, un-radio-group[formcontrolname='{f.name}' i] un-radio label, un-radio-group[ng-reflect-name='{f.name}' i] un-radio label").all():
+                                    txt = (lbl.text_content() or "").strip()
+                                    if txt and txt not in available_options:
+                                        available_options.append(txt)
 
-                elif classification == QuestionClassification.SAFE_INFERENCE and f.tag == "textarea":
-                    formatted_text = str(val)
-                    if "[AI DRAFT" not in formatted_text:
-                        formatted_text = f"[AI DRAFT - PENDING APPROVAL]\n\n{formatted_text}"
-                    loc = _field_locator("textarea")
-                    if loc.count() > 0 and loc.is_editable():
-                        loc.fill(formatted_text)
-                    processed_answers.append({
-                        "question_id": f.id or f.name,
-                        "label": f.label,
-                        "answer": formatted_text,
-                        "is_ai_draft": True,
-                    })
+                                return FillResult(
+                                    success=False,
+                                    status="manual_required",
+                                    resolution_request={
+                                        "field_name": f.name,
+                                        "field_label": f.label,
+                                        "field_role": f.field_role,
+                                        "candidate_value": str(val),
+                                        "available_options": available_options,
+                                        "reason": "NO_EXACT_MATCH"
+                                    },
+                                    error_reason=(
+                                        f"Field '{f.label or f.name}' has no radio option "
+                                        "matching the candidate value. Cannot auto-fill."
+                                    ),
+                                )
+
+                    elif f.tag == "mat-select":
+                        sel = _field_locator("mat-select")
+                        if sel.count() > 0 and sel.is_visible():
+                            # U10.6: If the currently selected value exactly matches the
+                            # candidate's value, we consider it successfully resolved.
+                            # We bypass opening the dropdown completely. This safely avoids
+                            # trying to click a hidden already-selected option while preserving
+                            # fail-closed behavior for mismatches.
+                            current_val = (sel.text_content() or "").strip().lower()
+                            expected_norm = str(val).strip().lower()
+                            if current_val == expected_norm:
+                                logger.debug("mat-select for %s already has the correct value '%s'", f.name, current_val)
+                                continue
+
+                            sel.click(force=True)
+                            page.wait_for_timeout(500)
+                            # U9/U10 DROPDOWN SAFETY: select only the option that
+                            # matches the candidate value exactly (with case and
+                            # whitespace normalization). There is NO fallback
+                            # to the first option -- a value with no matching
+                            # option is unresolved and fails closed when the
+                            # field is required.
+                            opt = self._match_option_by_text(
+                                page.locator("mat-option, .mat-mdc-option"), str(val)
+                            )
+                            if opt is not None and opt.is_visible():
+                                opt.click(force=True)
+                                page.wait_for_timeout(300)
+                                logger.debug("Selected matching mat-option for %s", f.name)
+                            else:
+                                page.keyboard.press("Escape")
+                                page.wait_for_timeout(300)
+                                logger.warning(
+                                    "No mat-option matches the candidate value for %s; "
+                                    "left unresolved instead of selecting an arbitrary option.",
+                                    f.name,
+                                )
+                                if f.required:
+                                    available_options = []
+                                    for opt_el in page.locator("mat-option, .mat-mdc-option").all():
+                                        txt = (opt_el.text_content() or "").strip()
+                                        if txt and txt not in available_options:
+                                            available_options.append(txt)
+
+                                    return FillResult(
+                                        success=False,
+                                        status="manual_required",
+                                        resolution_request={
+                                            "field_name": f.name,
+                                            "field_label": f.label,
+                                            "field_role": f.field_role,
+                                            "candidate_value": str(val),
+                                            "available_options": available_options,
+                                            "reason": "NO_EXACT_MATCH"
+                                        },
+                                        error_reason=(
+                                            f"Field '{f.label or f.name}' has no dropdown option "
+                                            "matching the candidate value. Cannot auto-fill."
+                                        ),
+                                    )
+
+                    elif f.tag == "un-checkbox":
+                        # U9: a checkbox is only ever checked on an explicit
+                        # affirmative value resolved for THIS application.  An
+                        # unresolved consent checkbox (CONSENT with no value)
+                        # never reaches here because val is None and the loop
+                        # skips it — the box is left untouched.
+                        if bool(val):
+                            chk_parts = []
+                            if f.id:
+                                chk_parts.append(f"un-checkbox[id='{f.id}' i] label")
+                            if f.name:
+                                chk_parts.append(f"un-checkbox[name='{f.name}' i] label")
+                                chk_parts.append(f"un-checkbox[formcontrolname='{f.name}' i] label")
+                                chk_parts.append(f"un-checkbox[ng-reflect-name='{f.name}' i] label")
+                            chk_sel = ", ".join(chk_parts) if chk_parts else "un-checkbox label"
+                            chk = page.locator(chk_sel).first
+                            if chk.count() > 0 and chk.is_visible():
+                                chk_input = page.locator(f"input[type='checkbox'][name='{f.name}' i], input[type='checkbox'][formcontrolname='{f.name}' i]").first
+                                if chk_input.count() > 0 and not chk_input.is_checked():
+                                    chk.click(force=True)
+                                    logger.debug("Checked %s per explicit consent", f.name)
+                                elif chk_input.count() == 0:
+                                    # Angular custom component (<un-checkbox>) wraps
+                                    # no native input, so its label is the only
+                                    # interaction surface.  The click here is
+                                    # authorized by the explicit consent value
+                                    # resolved for this application — never by the
+                                    # mere existence of the checkbox.
+                                    chk.click(force=True)
+                                    logger.debug(
+                                        "Checked custom component %s per explicit consent",
+                                        f.name,
+                                    )
+                            else:
+                                logger.warning("Failed to find a visible checkbox for %s", f.name)
+
+                    elif f.field_role == "statement_of_purpose":
+                        formatted_text = str(val)
+                        if "[AI DRAFT" not in formatted_text:
+                            formatted_text = f"[AI DRAFT - PENDING APPROVAL]\n\n{formatted_text}"
+                        textarea = page.locator("textarea[name*='statement'], textarea[placeholder*='Why'], textarea").first
+                        if textarea.count() > 0 and textarea.is_editable():
+                            textarea.fill(formatted_text)
+                        processed_answers.append({
+                            "question_id": f.id or "statement_of_purpose",
+                            "label": f.label or "Why do you want to apply for this opportunity?",
+                            "answer": formatted_text,
+                            "is_ai_draft": True,
+                        })
+
+                    elif classification == QuestionClassification.SAFE_INFERENCE and f.tag == "textarea":
+                        formatted_text = str(val)
+                        if "[AI DRAFT" not in formatted_text:
+                            formatted_text = f"[AI DRAFT - PENDING APPROVAL]\n\n{formatted_text}"
+                        loc = _field_locator("textarea")
+                        if loc.count() > 0 and loc.is_editable():
+                            loc.fill(formatted_text)
+                        processed_answers.append({
+                            "question_id": f.id or f.name,
+                            "label": f.label,
+                            "answer": formatted_text,
+                            "is_ai_draft": True,
+                        })
+
+            fill_field_result = _fill_all_fields(classified_fields)
+            if fill_field_result is not None:
+                return fill_field_result
 
             # Resume upload if present
             if resume_path and Path(resume_path).exists():
@@ -1242,21 +1631,103 @@ class UnstopAdapter(BasePlatformAdapter):
                 if file_input.count() > 0:
                     file_input.first.set_input_files(resume_path)
 
-            # Check for conditional fields
-            new_fields = self.extract_form_fields(page)
-            for nf in new_fields:
-                if nf.required and not any(existing.id == nf.id and existing.name == nf.name for existing in extracted_fields):
-                    nf_class, _ = self.classify_field(nf, candidate_data, custom_answers)
-                    if nf_class in {QuestionClassification.REQUIRES_USER, QuestionClassification.UNSUPPORTED}:
+            MAX_STEPS = 10
+            reached_terminal_boundary = False
+            for step_idx in range(MAX_STEPS):
+                next_btn = page.locator(
+                    "button:not(#unstop_submit):has-text('Next'), "
+                    "button:not(#unstop_submit):has-text('Save & Continue'), "
+                    "button:not(#unstop_submit):has-text('Save and Continue')"
+                ).first
+                final_btn = page.locator(
+                    "button#unstop_submit, "
+                    "button:has-text('Complete Registration'), "
+                    "button:has-text('Submit Application'), "
+                    "button:has-text('Submit'), "
+                    "button:has-text('Complete')"
+                ).first
+
+                if final_btn.count() > 0 and final_btn.is_visible():
+                    logger.info("Final submit control visible — stopping at review page (step %d).", step_idx + 1)
+                    break
+
+                if next_btn.count() == 0 or not next_btn.is_visible():
+                    logger.info("No navigation control visible — assuming final page (step %d).", step_idx + 1)
+                    break
+
+                # U9 PROGRESSIVE-FORM SAFETY — the highest-priority invariant.
+                #
+                # A progressive Unstop form labels its terminal action "Next", so
+                # a naive fill loop submits the application by clicking it.  Before
+                # clicking ANY navigation control the fill phase must decide, from
+                # deterministic stepper state, whether the current step is the
+                # terminal one.  A terminal navigation control is NEVER clicked by
+                # fill(); it is handed to the submission state machine, which owns
+                # the single final click.
+                step_context = self.detect_terminal_step_context(page)
+                if step_context.is_terminal:
+                    reached_terminal_boundary = True
+                    terminal_evidence = step_context.evidence
+                    logger.info(
+                        "Terminal step reached (step %s of %s, evidence=%s) — halting "
+                        "before the terminal navigation control; the submission state "
+                        "machine owns the final action.",
+                        step_context.current_step,
+                        step_context.total_steps,
+                        step_context.evidence,
+                    )
+                    break
+
+                logger.info("Advancing progressive form (step %d)...", step_idx + 1)
+                next_btn.click()
+                page.wait_for_timeout(2500)
+
+                step_fields = self.extract_form_fields(page)
+                step_classified = []
+                for sf in step_fields:
+                    sf_class, sf_val = self.classify_field(sf, candidate_data, custom_answers, manual_resolutions)
+                    sf.classification = sf_class
+                    step_classified.append((sf, sf_class, sf_val))
+                    logger.debug(
+                        "unstop step field classified: name=%s role=%s required=%s class=%s",
+                        sf.name, sf.field_role, sf.required, sf_class.value,
+                    )
+                    if sf.required and sf_class in {
+                        QuestionClassification.REQUIRES_USER,
+                        QuestionClassification.UNSUPPORTED,
+                        QuestionClassification.CONSENT,
+                    } and sf_val is None:
+                        logger.warning(
+                            "Stopping fill: conditional field %s is unresolved (%s).",
+                            sf.name, sf_class.value,
+                        )
                         return FillResult(
                             success=False,
                             status="manual_required",
-                            error_reason=f"Conditional field '{nf.label or nf.name}' appeared and requires user input.",
+                            error_reason=f"Conditional field '{sf.label or sf.name}' requires user input.",
                         )
+                step_fill_result = _fill_all_fields(step_classified)
+                if step_fill_result is not None:
+                    return step_fill_result
 
             # CRITICAL SAFETY BOUNDARY:
-            # Verify that final submission controls are NOT clicked.
-            # The Worker leaves the browser window open at the completed form.
+            # The fill phase never clicks a final submission control.  When the
+            # terminal boundary of a progressive form was reached, the browser is
+            # left open at the completed-but-unsubmitted form in state
+            # ``form_filled``; the terminal control is resolved and clicked once
+            # by the submission state machine.
+            if reached_terminal_boundary:
+                return FillResult(
+                    success=True,
+                    status="form_filled",
+                    message=(
+                        "Progressive form filled; halted before the terminal step "
+                        "control. The submission state machine owns the final action."
+                    ),
+                    custom_answers=processed_answers,
+                    is_terminal_reached=True,
+                )
+
             return FillResult(
                 success=True,
                 status="ready_for_review",
@@ -1286,6 +1757,14 @@ class UnstopAdapter(BasePlatformAdapter):
             return evaluate_submission_confirmation(page, opportunity_id=app_ctx.opportunity_id)
         except Exception:
             return SubmissionStatus(confirmed=False, status="ambiguous", detail="confirmation_probe_failed")
+
+    def detect_terminal_step_context(self, page: Any) -> TerminalStepContext:
+        """Provide explicit terminal-step evidence for submission control resolution.
+
+        The adapter owns stepper/DOM interpretation so that
+        ``submission_controls`` never has to scrape unrelated page state.
+        """
+        return detect_terminal_step_context(page)
 
     # ── Explicit human-approved submission boundary (U4 / M2A) ─────────────
 
@@ -1423,7 +1902,12 @@ class UnstopAdapter(BasePlatformAdapter):
             }
 
         # ── Gate 4: Resolve the unique, verified final submission control ──────
-        resolution = resolve_final_submission_control(page)
+        # U9: supply explicit terminal-step evidence so a progressive form whose
+        # terminal action is labelled "Next" resolves to exactly one final
+        # control.  Without this evidence, "Next" stays intermediate and the
+        # gate fails closed rather than clicking a navigation control.
+        terminal_context = self.detect_terminal_step_context(page)
+        resolution = resolve_final_submission_control(page, terminal_context=terminal_context)
         if resolution.status != SubmissionControlResolutionStatus.EXACTLY_ONE_FINAL or resolution.locator is None:
             # M2C: An unresolved final boundary is not a retryable browser
             # failure.  This is deliberately limited to resolver outcomes; the
@@ -1472,7 +1956,11 @@ class UnstopAdapter(BasePlatformAdapter):
 
         # M2A Revalidation: strictly revalidate the live element handle immediately before click
         is_reval_valid, reval_reason = revalidate_handle_before_click(
-            page, resolution.locator, resolution.verified_control, expected_form_handle=resolution.form_handle
+            page,
+            resolution.locator,
+            resolution.verified_control,
+            expected_form_handle=resolution.form_handle,
+            terminal_context=terminal_context,
         )
         if not is_reval_valid:
             return {
@@ -1637,6 +2125,78 @@ class UnstopAdapter(BasePlatformAdapter):
         )
 
 
+# U9: read-only inspection of the Angular Material stepper state.
+#
+# A progressive Unstop form may label its terminal action "Next".  Terminality
+# is derived ONLY from the stepper's own selected index — never from button
+# counts, URL shape, or page layout guesses.  The adapter turns this into
+# explicit TerminalStepContext for submission_controls.
+_STEPPER_STATE_JS = """
+() => {
+    const stepper = document.querySelector("mat-horizontal-stepper, mat-vertical-stepper");
+    if (!stepper) return {"found": false, "total": 0, "selected": null, "reason": "stepper_not_found"};
+    const headers = Array.from(stepper.querySelectorAll("mat-step-header, [role='tab']"));
+    if (!headers.length) return {"found": false, "total": 0, "selected": null, "reason": "stepper_headers_not_found"};
+    let selected = null;
+    for (let i = 0; i < headers.length; i++) {
+        if (headers[i].getAttribute("aria-selected") === "true") { selected = i; }
+    }
+    if (selected === null) {
+        return {"found": true, "total": headers.length, "selected": null,
+                "reason": "selected_step_indeterminate"};
+    }
+    return {"found": true, "total": headers.length, "selected": selected,
+            "reason": "angular_stepper_selected_index"};
+}
+"""
+
+
+def detect_terminal_step_context(page: Any) -> TerminalStepContext:
+    """Derive explicit terminal-step evidence from the page (read-only).
+
+    Never guesses: without a trustworthy Angular stepper state the context is
+    explicitly non-terminal, so navigation controls stay INTERMEDIATE.
+    """
+    if page is None or not callable(getattr(page, "evaluate", None)):
+        return TerminalStepContext(is_terminal=False, evidence="stepper_probe_unavailable")
+    try:
+        state = page.evaluate(_STEPPER_STATE_JS)
+    except Exception:
+        return TerminalStepContext(is_terminal=False, evidence="stepper_probe_failed")
+    if not isinstance(state, dict):
+        return TerminalStepContext(is_terminal=False, evidence="stepper_probe_malformed")
+
+    if not state.get("found"):
+        return TerminalStepContext(
+            is_terminal=False,
+            evidence=str(state.get("reason") or "stepper_not_found"),
+        )
+
+    total = state.get("total")
+    selected = state.get("selected")
+    if not isinstance(total, int) or total <= 0:
+        return TerminalStepContext(is_terminal=False, evidence="stepper_step_count_unavailable")
+
+    if not isinstance(selected, int):
+        return TerminalStepContext(
+            is_terminal=False,
+            evidence="selected_step_indeterminate",
+            total_steps=total,
+        )
+
+    is_terminal = selected == total - 1
+    return TerminalStepContext(
+        is_terminal=is_terminal,
+        evidence=(
+            "angular_stepper_last_step_selected"
+            if is_terminal
+            else "angular_stepper_intermediate_step"
+        ),
+        current_step=selected,
+        total_steps=total,
+    )
+
+
 def is_valid_unstop_origin(url: str | None) -> bool:
     """Validate that a URL belongs strictly to an authorized HTTPS Unstop origin.
 
@@ -1709,6 +2269,22 @@ def evaluate_submission_confirmation(
             confirmed=False,
             status="unauthenticated",
             detail="unauthenticated_redirect",
+        )
+
+    # U9: /register/edit is platform evidence that a registration already exists
+    # for this opportunity — Unstop only exposes an edit view of an existing
+    # registration.  Classified as confirmed so local state is never mistaken
+    # for an unsubmitted form after an already-completed external registration.
+    # This is path-only evidence (never query/fragment) and is checked before
+    # the active-form-input probe, which would otherwise see the editable form.
+    if re.search(r"/register(?:/[^/]+)?/edit$", path):
+        return SubmissionStatus(
+            confirmed=True,
+            status="confirmed",
+            confirmation_ref=(
+                f"UNSTOP-CONFIRMED-{opportunity_id}" if opportunity_id else "UNSTOP-CONFIRMED"
+            ),
+            detail="registration_edit_page",
         )
 
     # 1. Reject if active registration inputs are still visible (fail closed on probe errors)

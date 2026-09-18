@@ -36,6 +36,25 @@ class SubmissionControlClassification(str, Enum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class TerminalStepContext:
+    """Explicit, adapter-provided evidence that the page is the final step.
+
+    A progressive form may label its terminal action "Next" (U9).  That control
+    is only promoted to FINAL_SUBMIT when the adapter supplies this explicit
+    terminal-step context; ``submission_controls`` never guesses terminality
+    from button counts, URL shape, or page layout.
+
+    ``is_terminal`` must be derived from deterministic, trustworthy state such
+    as the selected index of an Angular Material stepper.
+    """
+
+    is_terminal: bool
+    evidence: str
+    current_step: int | None = None
+    total_steps: int | None = None
+
+
 class SubmissionControlResolutionStatus(str, Enum):
     """Outcome of resolving the final submission control on a page."""
 
@@ -322,6 +341,20 @@ KNOWN_FINAL_SUBMIT_IDS = {
     "unstop_submit",
 }
 
+# Navigation actions that a progressive form may label its terminal step with.
+# Only these are promotable to FINAL_SUBMIT via explicit terminal-step context.
+# Destructive or dismissive actions (back, cancel, dismiss) are never promoted.
+PROMOTABLE_NAVIGATION_TEXTS = {
+    "next",
+    "continue",
+    "save and continue",
+    "save & continue",
+    "save and next",
+    "save & next",
+    "proceed",
+    "proceed to questions",
+}
+
 # Words/phrases indicating multi-step navigation, intermediate saving, or review
 INTERMEDIATE_SUBSTRINGS = (
     "next",
@@ -383,13 +416,23 @@ def sanitize_url_path(url: str | None) -> str | None:
         return None
 
 
-def classify_submission_control(candidate: SubmissionControlCandidate) -> SubmissionControlClassification:
+def classify_submission_control(
+    candidate: SubmissionControlCandidate,
+    *,
+    terminal_context: TerminalStepContext | None = None,
+) -> SubmissionControlClassification:
     """Pure semantic classifier for candidate submission controls.
 
     Parameters
     ----------
     candidate : SubmissionControlCandidate
         Extracted metadata for a single interactive control.
+    terminal_context : TerminalStepContext | None
+        Optional explicit, adapter-provided terminal-step evidence.  When the
+        adapter proves the page is the final step of a progressive form, a
+        navigation control such as "Next" is promoted to FINAL_SUBMIT.  Without
+        this context, "Next" remains INTERMEDIATE — it is never globally
+        promoted, and terminality is never guessed.
 
     Returns
     -------
@@ -403,7 +446,26 @@ def classify_submission_control(candidate: SubmissionControlCandidate) -> Submis
     if not candidate.is_in_active_form:
         return SubmissionControlClassification.REJECTED
 
-    # Rule 2: Explicit intermediate meanings (Next, Save, Continue, Preview, Back, etc.)
+    # Rule 2: Known platform final submit ID (unstop_submit)
+    if elem_id in KNOWN_FINAL_SUBMIT_IDS:
+        return SubmissionControlClassification.FINAL_SUBMIT
+
+    # Rule 3: Exact final submit text matches
+    if norm_text in FINAL_SUBMIT_TEXTS:
+        return SubmissionControlClassification.FINAL_SUBMIT
+
+    # Rule 3b: Explicit terminal-step context promotes a progressive-form
+    # navigation control ("Next" / "Continue") to FINAL_SUBMIT.  The context is
+    # supplied by the adapter from deterministic stepper state; without it the
+    # control stays intermediate.
+    if (
+        terminal_context is not None
+        and terminal_context.is_terminal
+        and norm_text in PROMOTABLE_NAVIGATION_TEXTS
+    ):
+        return SubmissionControlClassification.FINAL_SUBMIT
+
+    # Rule 4: Explicit intermediate meanings (Next, Save, Continue, Preview, Back, etc.)
     combined_desc = " ".join(
         filter(
             None,
@@ -420,15 +482,6 @@ def classify_submission_control(candidate: SubmissionControlCandidate) -> Submis
         pattern = rf"(^|\b){re.escape(marker)}(\b|$)"
         if re.search(pattern, combined_desc):
             return SubmissionControlClassification.INTERMEDIATE
-
-    # Rule 3: Exact final submit text matches
-    if norm_text in FINAL_SUBMIT_TEXTS:
-        return SubmissionControlClassification.FINAL_SUBMIT
-
-    # Rule 4: Known platform final submit ID (unstop_submit)
-    if elem_id in KNOWN_FINAL_SUBMIT_IDS:
-        if norm_text in FINAL_SUBMIT_TEXTS or norm_text in ("submit", "register", "apply"):
-            return SubmissionControlClassification.FINAL_SUBMIT
 
     # Rule 5: Generic .submit-btn class, input[type='submit'], or partial "submit" alone
     if norm_text == "submit":
@@ -683,7 +736,11 @@ def inspect_submission_controls(page: Any) -> list[tuple[SubmissionControlCandid
     return results
 
 
-def resolve_final_submission_control(page: Any) -> SubmissionControlResolution:
+def resolve_final_submission_control(
+    page: Any,
+    *,
+    terminal_context: TerminalStepContext | None = None,
+) -> SubmissionControlResolution:
     """Resolve the unique, irreversible final submission control on the page.
 
     Enforces fail-closed safety rules:
@@ -695,6 +752,10 @@ def resolve_final_submission_control(page: Any) -> SubmissionControlResolution:
     - Intermediate / unknown controls are never clicked.
     - Any inspection or handle error returns INSPECTION_ERROR with locator=None.
     - Completely eliminates locator reconstruction or fallback lookup.
+
+    ``terminal_context`` is explicit adapter-provided evidence that the page is
+    the final step of a progressive form (U9); it lets a terminal "Next" resolve
+    as the single final control so the submission state machine can own it.
     """
     try:
         inspected = inspect_submission_controls(page)
@@ -713,7 +774,7 @@ def resolve_final_submission_control(page: Any) -> SubmissionControlResolution:
 
     for cand, handle in inspected:
         candidates.append(cand)
-        cls = classify_submission_control(cand)
+        cls = classify_submission_control(cand, terminal_context=terminal_context)
         classified.append((cand, cls))
 
         if cls == SubmissionControlClassification.FINAL_SUBMIT:
@@ -819,6 +880,8 @@ def revalidate_handle_before_click(
     handle: Any,
     expected_candidate: SubmissionControlCandidate,
     expected_form_handle: Any = None,
+    *,
+    terminal_context: TerminalStepContext | None = None,
 ) -> tuple[bool, str]:
     """Strictly revalidate the exact DOM element handle immediately before the click path.
 
@@ -832,6 +895,10 @@ def revalidate_handle_before_click(
     6. Verifies all fingerprint fields (text, tag, ID, name, role, control type, accessibility metadata, sanitized form action).
     7. Dynamically checks active-form rules without hardcoding True.
     8. Re-classifies candidate as FINAL_SUBMIT.
+
+    ``terminal_context`` must be the same explicit terminal-step evidence used
+    at resolution time, so the promoted control stays consistent across the
+    resolution/revalidation boundary.
     """
     if handle is None:
         return False, "handle_none"
@@ -847,7 +914,7 @@ def revalidate_handle_before_click(
 
     final_matches = []
     for r_cand, r_handle in reinspected:
-        cls = classify_submission_control(r_cand)
+        cls = classify_submission_control(r_cand, terminal_context=terminal_context)
         if cls == SubmissionControlClassification.FINAL_SUBMIT and r_cand.is_visible and not r_cand.is_disabled:
             final_matches.append((r_cand, r_handle))
 
@@ -984,7 +1051,7 @@ def revalidate_handle_before_click(
         form_action_path=live_action_path,
         form_method=live_meta.get("form_method"),
     )
-    if classify_submission_control(recheck_cand) != SubmissionControlClassification.FINAL_SUBMIT:
+    if classify_submission_control(recheck_cand, terminal_context=terminal_context) != SubmissionControlClassification.FINAL_SUBMIT:
         return False, "reclassification_failed"
 
     return True, "revalidation_passed"

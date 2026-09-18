@@ -16,6 +16,12 @@ class EducationCreate(BaseModel):
     branch: str
     institution: str
     graduation_year: int | None = None
+    # U9: explicit candidate-provided course duration.  Optional, no default,
+    # and never inferred from the other fields or from form options.
+    duration: str | None = None
+    # U10: explicit candidate-provided education domain. Optional, no default,
+    # and never inferred from degree, branch, or form options.
+    domain: str | None = None
 
 
 class EducationResponse(EducationCreate):

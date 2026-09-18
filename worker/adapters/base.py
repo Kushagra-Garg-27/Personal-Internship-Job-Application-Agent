@@ -52,11 +52,21 @@ class FillResult:
     """Result of attempting to fill an application form."""
 
     success: bool
-    status: str  # "ready_for_review", "manual_required", "failed"
+    # "ready_for_review" (final control left untouched), "form_filled"
+    # (progressive form halted at its terminal step boundary), "manual_required",
+    # "failed".
+    status: str
     message: str | None = None
     draft_payload: dict[str, Any] | None = None
     custom_answers: list[dict[str, Any]] = field(default_factory=list)
     error_reason: str | None = None
+    # U9: True when the fill phase reached — but did NOT click — the terminal
+    # control of a progressive form.  The terminal control is handed to the
+    # submission state machine, which owns the single final click.
+    is_terminal_reached: bool = False
+
+    # U11: Optional data for requesting manual resolution of ambiguities (e.g. taxonomies)
+    resolution_request: dict[str, Any] | None = None
 
 
 @dataclass
@@ -98,6 +108,7 @@ class BasePlatformAdapter(ABC):
         candidate_data: dict[str, Any],
         resume_path: str | None = None,
         custom_answers: list[dict[str, Any]] | None = None,
+        manual_resolutions: dict[str, str] | None = None,
     ) -> FillResult:
         """Fill structured fields and drafted custom answers into form or draft payload.
         System invariant: Never autonomously submits; explicit human authorization is required.

@@ -268,6 +268,60 @@ class WorkerRunner:
         self._scheduler = sched
         return sched
 
+    def submit_single_application(
+        self,
+        session: Session,
+        application_id: int,
+        worker_id: str = "worker",
+    ) -> dict[str, Any]:
+        """Target exactly one application for browser submission (claim -> execute).
+
+        Used for bounded, observable live validation runs.  Reuses all existing
+        guard logic -- approval check, revocation check, atomic claim -- without
+        weakening any gate.  Returns the outcome dict from
+        ``execute_browser_submission`` or a descriptive error.
+        """
+        app = session.get(Application, application_id)
+        if app is None:
+            return {"success": False, "status": "error", "reason": f"Application {application_id} not found."}
+
+        # Pre-flight: validate the application is in a submittable state
+        if app.approved_at is None:
+            return {"success": False, "status": "error", "reason": f"Application {application_id} has no approval (approved_at is None)."}
+
+        if app.submission_claimed_at is not None:
+            return {"success": False, "status": "error", "reason": f"Application {application_id} is already claimed."}
+
+        if app.status not in (ApplicationStatus.FORM_FILLED.value, ApplicationStatus.PENDING.value):
+            return {"success": False, "status": "error", "reason": f"Application {application_id} status is {app.status!r}; must be form_filled or pending."}
+
+        opp = session.get(Opportunity, app.opportunity_id)
+        if opp is None:
+            return {"success": False, "status": "error", "reason": f"Opportunity {app.opportunity_id} not found."}
+
+        if opp.status != OpportunityStatus.AWAITING_SUBMISSION.value:
+            return {"success": False, "status": "error", "reason": f"Opportunity {opp.id} status is {opp.status!r}; must be awaiting_submission."}
+
+        # Atomically claim
+        claimed = self.claim_application_for_submission(session, application_id, worker_id=worker_id)
+        if not claimed:
+            return {"success": False, "status": "error", "reason": f"Failed to atomically claim application {application_id}."}
+
+        # Refresh to get the persisted claim identity
+        session.refresh(app)
+        logger.info(
+            "Single-application mode: claimed App #%d (Opp #%d) -- executing browser submission.",
+            app.id, opp.id,
+        )
+
+        result = self.filler.execute_browser_submission(
+            session,
+            app.id,
+            expected_claimed_by=worker_id,
+            expected_submission_claimed_at=app.submission_claimed_at,
+        )
+        return result
+
     def stop(self) -> None:
         if self._scheduler and self._scheduler.running:
             self._scheduler.shutdown(wait=False)

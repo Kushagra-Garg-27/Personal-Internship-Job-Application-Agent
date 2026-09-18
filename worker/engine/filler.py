@@ -13,12 +13,13 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
+import sqlalchemy as sa
 
 from core.models.opportunity import Application, Opportunity
 from core.models.profile import Profile
 from core.models.resume import Resume
 from core.repositories import profile_repo
-from core.services import application_service, opportunity_service
+from core.services import application_service, manual_resolution_service, opportunity_service
 from core.services.submission_service import (
     compute_approved_input_digest,
     compute_file_sha256,
@@ -46,16 +47,26 @@ def serialize_profile(profile: Profile | None) -> dict[str, Any]:
     """Serialize profile ORM model into dictionary for adapter consumption."""
     if profile is None:
         return {}
-    
-    edu_list = [
-        {
+
+    edu_list = []
+    for e in (profile.education or []):
+        edu = {
             "degree": e.degree,
             "branch": e.branch,
             "institution": e.institution,
             "graduation_year": e.graduation_year,
         }
-        for e in (profile.education or [])
-    ]
+        # U9: duration is emitted only when explicitly present so that an
+        # absent value stays absent (None) and is never fabricated from the
+        # degree, graduation year, or form options.
+        if e.duration:
+            edu["duration"] = e.duration
+        # U10: domain is emitted only when explicitly present so that an
+        # absent value stays absent (None) and is never fabricated from the
+        # degree, branch, or form options.
+        if e.domain:
+            edu["domain"] = e.domain
+        edu_list.append(edu)
     skills_list = [
         {"skill_name": s.skill_name, "proficiency": s.proficiency}
         for s in (profile.skills or [])
@@ -65,7 +76,7 @@ def serialize_profile(profile: Profile | None) -> dict[str, Any]:
         for l in (profile.links or [])
     ]
 
-    return {
+    res = {
         "id": profile.id,
         "name": profile.name,
         "full_name": profile.full_name,
@@ -85,7 +96,22 @@ def serialize_profile(profile: Profile | None) -> dict[str, Any]:
         "user_type": profile.user_type,
         "gender": profile.gender,
         "differently_abled": profile.differently_abled,
+        # U9: platform/application consent is intentionally NOT serialized
+        # here.  Terms acceptance is application-scoped and must be supplied
+        # as an explicit per-application answer; it is never a static profile
+        # fact and never defaulted to True.
     }
+
+    if profile.education:
+        e0 = profile.education[0]
+        if e0.degree:
+            res.setdefault("course_stream", e0.degree)
+        if e0.branch:
+            res.setdefault("course_specialization", e0.branch)
+        if e0.graduation_year:
+            res.setdefault("graduation_year", str(e0.graduation_year))
+
+    return res
 
 
 class ApplicationFiller:
@@ -194,13 +220,30 @@ class ApplicationFiller:
             return {"status": "manual_required", "reason": reason}
 
         # 5. Idempotency pre-write primitive from Phase 2
-        app_record = opportunity_service.mark_submission_attempted(
-            session,
-            opportunity_id=opp.id,
-            resume_id=resume_id,
-            adapter_name=adapter.adapter_name,
+        # Check if there is an existing PENDING application (e.g. from a manual resume)
+        stmt = sa.select(Application).where(
+            Application.opportunity_id == opp.id,
+            Application.status == "pending"
+        ).order_by(Application.attempt_number.desc())
+        app_record = session.scalars(stmt).first()
+
+        if not app_record:
+            app_record = opportunity_service.mark_submission_attempted(
+                session,
+                opportunity_id=opp.id,
+                resume_id=resume_id,
+                adapter_name=adapter.adapter_name,
+            )
+            session.commit()
+
+        # U11.1: Collect the currently-active manual resolutions for this
+        # application attempt.  Retrieval is deterministic and scoped strictly to
+        # this application: only RESOLVED requests are returned (never PENDING or
+        # INVALIDATED), and the most recent resolved request wins per field — the
+        # result never depends on relationship/dictionary iteration order.
+        manual_resolutions = manual_resolution_service.get_active_resolutions(
+            session, app_record.id
         )
-        session.commit()
 
         # 6. Open application and extract questions
         app_ctx = adapter.open_application(opp.url or "", opportunity_id=opp.id)
@@ -232,6 +275,7 @@ class ApplicationFiller:
             candidate_data=candidate_data,
             resume_path=resume_path,
             custom_answers=custom_answers,
+            manual_resolutions=manual_resolutions,
         )
 
         # Post-fill DOM and screenshot diagnostics
@@ -273,6 +317,37 @@ class ApplicationFiller:
                 reason=reason,
                 actor="worker",
             )
+
+            if hasattr(fill_result, "resolution_request") and fill_result.resolution_request:
+                from core.models.opportunity import ManualResolutionRequest
+                req_data = fill_result.resolution_request
+                # U11.1: explicitly retire any currently-active (PENDING or
+                # RESOLVED) request for the same field before recording the new
+                # one.  A previously RESOLVED answer that just failed
+                # re-validation against the live option set is marked
+                # INVALIDATED — it can never be replayed as an active resolution
+                # again, the historical row is retained for audit, and only the
+                # new PENDING request represents the current unresolved state.
+                manual_resolution_service.invalidate_active_requests(
+                    session,
+                    app_record.id,
+                    req_data["field_name"],
+                    reason="superseded_by_new_request",
+                    actor="worker",
+                )
+                new_req = ManualResolutionRequest(
+                    application_id=app_record.id,
+                    opportunity_id=opp.id,
+                    field_name=req_data["field_name"],
+                    field_label=req_data.get("field_label"),
+                    field_role=req_data.get("field_role"),
+                    candidate_value=req_data.get("candidate_value"),
+                    available_options=req_data.get("available_options", []),
+                    reason=req_data.get("reason", "NO_EXACT_MATCH"),
+                    status="pending"
+                )
+                session.add(new_req)
+
             session.commit()
             return {
                 "status": "manual_required",
@@ -1051,7 +1126,7 @@ class ApplicationFiller:
             )
 
             # Evidence capture (best-effort — never fail a verified submission over this)
-            artifacts_dir = Path("artifacts/u7_submission_evidence")
+            artifacts_dir = Path("artifacts/u8_submission_evidence")
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             timestamp = now.strftime("%Y%m%d_%H%M%S")
             evidence_file = artifacts_dir / f"app_{app.id}_{timestamp}_evidence.json"
@@ -1060,6 +1135,7 @@ class ApplicationFiller:
             evidence_data = {
                 "application_id": app.id,
                 "opportunity_id": opp.id,
+                "target_url": opp.url or "",
                 "adapter": adapter.adapter_name,
                 "timestamp": now.isoformat(),
                 "confirmation_ref": conf_ref,

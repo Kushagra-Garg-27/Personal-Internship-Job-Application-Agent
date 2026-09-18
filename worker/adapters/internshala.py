@@ -146,6 +146,7 @@ class InternshalaAdapter(BasePlatformAdapter):
         candidate_data: dict[str, Any],
         resume_path: str | None = None,
         custom_answers: list[dict[str, Any]] | None = None,
+        manual_resolutions: dict[str, str] | None = None,
     ) -> FillResult:
         """Fill the form elements on the live page and leave browser open at unsubmitted state."""
         if app_ctx.metadata.get("session_missing"):

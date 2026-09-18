@@ -7,6 +7,7 @@ fills applications via tiered adapters, and stops before submit.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 
@@ -35,9 +36,25 @@ def main() -> None:
         default=20,
         help="Polling interval in seconds for daemon mode (default: 20s).",
     )
+    parser.add_argument(
+        "--application-id",
+        type=int,
+        default=None,
+        help="Target exactly one application ID for submission (implies --once). "
+             "Only this application will be processed; queue polling is skipped.",
+    )
     args = parser.parse_args()
 
     runner = WorkerRunner(poll_interval=args.interval)
+
+    if args.application_id is not None:
+        from core.database import get_session
+
+        logger.info("Single-application mode: targeting Application #%d", args.application_id)
+        with get_session() as session:
+            result = runner.submit_single_application(session, args.application_id)
+        logger.info("Result: %s", json.dumps(result, default=str, indent=2))
+        sys.exit(0 if result.get("success") else 1)
 
     if args.once:
         logger.info("Running single worker pass...")
